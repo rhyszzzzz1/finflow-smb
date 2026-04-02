@@ -20,6 +20,19 @@ interface AuthContextType {
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
+const API_BASE = "/api";
+
+const postJson = async (endpoint: string, payload: unknown) => {
+  const response = await fetch(`${API_BASE}${endpoint}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+
+  const data = await response.json();
+  return { response, data };
+};
+
 export const useAuth = () => {
   const context = useContext(AuthContext);
   if (!context) {
@@ -53,13 +66,7 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
 
   const signup = async (name: string, email: string, password: string): Promise<boolean> => {
     try {
-      const response = await fetch("http://localhost:5001/api/auth/signup", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name, email, password }),
-      });
-
-      const data = await response.json();
+      const { response, data } = await postJson("/auth/signup", { name, email, password });
 
       if (!response.ok) {
         toast.error(data.message || "Failed to create account");
@@ -85,13 +92,7 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
 
   const login = async (email: string, password: string, _rememberMe: boolean): Promise<boolean> => {
     try {
-      const response = await fetch("http://localhost:5001/api/auth/login", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email, password }),
-      });
-
-      const data = await response.json();
+      const { response, data } = await postJson("/auth/login", { email, password });
 
       if (!response.ok) {
         toast.error(data.message || "Invalid email or password");

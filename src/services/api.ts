@@ -1,5 +1,5 @@
 // API service for communicating with the backend
-const API_URL = "http://localhost:5001/api";
+const API_BASE = "/api";
 
 // Get token from localStorage
 const getToken = () => localStorage.getItem("auth_token");
@@ -17,7 +17,7 @@ const apiRequest = async (endpoint: string, options: RequestInit = {}) => {
     headers["Authorization"] = `Bearer ${token}`;
   }
 
-  const response = await fetch(`${API_URL}${endpoint}`, {
+  const response = await fetch(`${API_BASE}${endpoint}`, {
     ...options,
     headers,
   });
@@ -317,7 +317,7 @@ export const kycApi = {
       headers["Authorization"] = `Bearer ${token}`;
     }
 
-    const response = await fetch(`${API_URL}/kyc/upload`, {
+    const response = await fetch(`${API_BASE}/kyc/upload`, {
       method: "POST",
       headers,
       body: formData,

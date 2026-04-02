@@ -4,6 +4,7 @@
 // ============================================================
 const express = require("express");
 const mysql = require("mysql2");
+const mysqlPromise = require("mysql2/promise");
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const cors = require("cors");
@@ -13,13 +14,39 @@ const path = require("path");
 const fs = require("fs");
 const crypto = require("crypto");
 const nodemailer = require("nodemailer");
+const { InventoryLedgerService } = require("./services/inventoryLedgerService");
+const { AccountingEngine } = require("./services/accountingEngine");
+const { JournalService } = require("./services/journalService");
+const { InvoicePurchaseService } = require("./services/invoicePurchaseService");
+const { AccountingReportsService } = require("./services/accountingReportsService");
+const { SalesInvoiceService } = require("./services/salesInvoiceService");
+const { PurchaseBillService } = require("./services/purchaseBillService");
+const { SettlementService } = require("./services/settlementService");
+const { TaxService } = require("./services/taxService");
+const { AccountingControlService } = require("./services/accountingControlService");
+const { AuditService } = require("./services/auditService");
+const { PaymentModel } = require("./models/paymentModel");
+const { PaymentService } = require("./services/paymentService");
+const { PaymentController } = require("./controllers/paymentController");
+const { SalesInvoiceController } = require("./controllers/salesInvoiceController");
+const { PurchaseBillController } = require("./controllers/purchaseBillController");
+const { InventoryController } = require("./controllers/inventoryController");
+const { InventoryRepository } = require("./repositories/inventoryRepository");
+const { InventoryService } = require("./services/inventoryService");
+const { createPaymentRoutes } = require("./routes/paymentRoutes");
+const { createSalesInvoiceRoutes } = require("./routes/salesInvoiceRoutes");
+const { createPurchaseBillRoutes } = require("./routes/purchaseBillRoutes");
+const { createInventoryRoutes } = require("./routes/inventoryRoutes");
+const { createAuditRequestMiddleware } = require("./middleware/auditRequestMiddleware");
 
 dotenv.config({ path: path.join(__dirname, "../.env") });
 
 const app = express();
 const PORT = process.env.PORT || 5000;
-const JWT_SECRET = process.env.JWT_SECRET || "finflow_jwt_secret_key_2024";
+const NODE_ENV = process.env.NODE_ENV || "development";
+const JWT_SECRET = process.env.JWT_SECRET;
 const OTP_EXPIRY_MINUTES = parseInt(process.env.SIGNUP_OTP_EXPIRY_MINUTES || "10", 10);
+const CORS_ORIGIN = process.env.CORS_ORIGIN || "http://localhost:8081,http://localhost:8080,http://localhost:5173,http://127.0.0.1:8081,http://127.0.0.1:8080,http://127.0.0.1:5173";
 const EMAIL_PROVIDER = process.env.EMAIL_PROVIDER || "gmail";
 const SMTP_HOST = process.env.SMTP_HOST || (EMAIL_PROVIDER === "gmail" ? "smtp.gmail.com" : "");
 const SMTP_PORT = parseInt(process.env.SMTP_PORT || (EMAIL_PROVIDER === "gmail" ? "587" : "587"), 10);
@@ -28,8 +55,27 @@ const SMTP_USER = process.env.SMTP_USER || process.env.GMAIL_USER || "";
 const SMTP_PASS = process.env.SMTP_PASS || process.env.GMAIL_APP_PASSWORD || "";
 const SMTP_FROM = process.env.SMTP_FROM || SMTP_USER || "";
 
+if (NODE_ENV === "production") {
+    const required = ["JWT_SECRET", "DB_HOST", "DB_USER", "DB_NAME", "CORS_ORIGIN"];
+    const missing = required.filter((k) => !process.env[k]);
+    if (missing.length) {
+        throw new Error(`Missing required environment variables: ${missing.join(", ")}`);
+    }
+}
+
+if (!JWT_SECRET) {
+    console.warn("[SECURITY_WARN] JWT_SECRET is not set. Set JWT_SECRET before production deployment.");
+}
+
 // ── Middleware ─────────────────────────────────────────────
-app.use(cors({ origin: "*", credentials: true }));
+const allowedOrigins = CORS_ORIGIN.split(",").map((o) => o.trim()).filter(Boolean);
+app.use(cors({
+    origin: (origin, cb) => {
+        if (!origin || allowedOrigins.includes(origin)) return cb(null, true);
+        return cb(new Error("CORS origin not allowed"));
+    },
+    credentials: true,
+}));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
@@ -66,6 +112,36 @@ function hashOtp(otp) {
 
 function generateOtp() {
     return String(Math.floor(100000 + Math.random() * 900000));
+}
+
+function safeJson(value) {
+    try {
+        return JSON.stringify(value ?? null);
+    } catch (_e) {
+        return JSON.stringify({ error: "non-serializable" });
+    }
+}
+
+function getRequestMeta(req) {
+    return req.requestMeta || {
+        ipAddress: req.ip || null,
+        userAgent: req.headers["user-agent"] || null,
+        route: req.originalUrl || req.path || null,
+        method: req.method || null,
+        requestBody: req.body || null,
+    };
+}
+
+function extractUserIdFromToken(req) {
+    const auth = req.headers["authorization"];
+    const token = auth && auth.split(" ")[1];
+    if (!token || !JWT_SECRET) return null;
+    try {
+        const decoded = jwt.verify(token, JWT_SECRET);
+        return decoded?.id || null;
+    } catch (_e) {
+        return null;
+    }
 }
 
 function isEmailDeliveryConfigured() {
@@ -131,6 +207,69 @@ const db = mysql.createConnection({
     database: process.env.DB_NAME || "finflowdb",
     multipleStatements: true,
 });
+
+const accountingPool = mysqlPromise.createPool({
+    host: process.env.DB_HOST || "localhost",
+    user: process.env.DB_USER || "root",
+    password: process.env.DB_PASSWORD || "",
+    database: process.env.DB_NAME || "finflowdb",
+    waitForConnections: true,
+    connectionLimit: 5,
+    queueLimit: 0,
+});
+const dbPromise = db.promise();
+
+const accountingEngine = new AccountingEngine(accountingPool);
+const auditService = new AuditService(accountingPool, { idFactory: newId });
+const accountingControlService = new AccountingControlService(accountingPool, {
+    allowSoftLockedBackdatedPosting: String(process.env.ALLOW_SOFT_LOCKED_BACKDATED_POSTING || "false").toLowerCase() === "true",
+});
+const journalService = new JournalService(accountingPool, {
+    accountingControlService,
+    auditService,
+});
+const taxService = new TaxService(accountingPool);
+const inventoryLedgerService = new InventoryLedgerService(db, { accountingEngine });
+const invoicePurchaseService = new InvoicePurchaseService(db);
+const salesInvoiceService = new SalesInvoiceService(accountingPool, {
+    journalService,
+    taxService,
+    accountingControlService,
+    inventoryLedgerService,
+    auditService,
+    idFactory: newId,
+});
+const purchaseBillService = new PurchaseBillService(accountingPool, {
+    journalService,
+    taxService,
+    accountingControlService,
+    inventoryLedgerService,
+    auditService,
+    idFactory: newId,
+});
+const settlementService = new SettlementService(accountingPool, {
+    journalService,
+    accountingControlService,
+    auditService,
+    idFactory: newId,
+});
+const accountingReportsService = new AccountingReportsService(db);
+const paymentModel = new PaymentModel(settlementService);
+const paymentService = new PaymentService(paymentModel, newId);
+const paymentController = new PaymentController(paymentService);
+const salesInvoiceController = new SalesInvoiceController(salesInvoiceService);
+const purchaseBillController = new PurchaseBillController(purchaseBillService);
+const inventoryRepository = new InventoryRepository(dbPromise);
+const inventoryService = new InventoryService({
+    inventoryRepository,
+    inventoryLedgerService,
+    idFactory: newId,
+});
+const inventoryController = new InventoryController(inventoryService, auditService);
+const paymentRoutes = createPaymentRoutes({ authenticate, paymentController });
+const salesInvoiceRoutes = createSalesInvoiceRoutes({ authenticate, salesInvoiceController });
+const purchaseBillRoutes = createPurchaseBillRoutes({ authenticate, purchaseBillController });
+const inventoryRoutes = createInventoryRoutes({ authenticate, inventoryController });
 
 db.connect((err) => {
     if (err) {
@@ -376,6 +515,18 @@ function initDB() {
       created_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
       updated_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
     );
+
+        CREATE TABLE IF NOT EXISTS audit_logs (
+            id             VARCHAR(36) PRIMARY KEY,
+            user_id        VARCHAR(36) NULL,
+            http_method    VARCHAR(10) NOT NULL,
+            endpoint       VARCHAR(255) NOT NULL,
+            status_code    INT NOT NULL,
+            request_body   JSON NULL,
+            created_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (user_id) REFERENCES profiles(id) ON DELETE SET NULL,
+            KEY idx_audit_user_date (user_id, created_at)
+        );
   `;
     db.query(sql, (err) => {
         if (err) console.error("? DB init error:", err.message);
@@ -385,23 +536,44 @@ function initDB() {
             db.query("ALTER TABLE inventory ADD COLUMN IF NOT EXISTS linked_vendor_profile_id VARCHAR(36) NULL", () => { });
             db.query("ALTER TABLE inventory ADD COLUMN IF NOT EXISTS vendor_product_id VARCHAR(36) NULL", () => { });
             db.query("ALTER TABLE inventory ADD COLUMN IF NOT EXISTS linked_purchase_id VARCHAR(36) NULL", () => { });
+            db.query("ALTER TABLE purchases ADD COLUMN IF NOT EXISTS status ENUM('draft','posted','void') NOT NULL DEFAULT 'posted'", () => { });
+            db.query("ALTER TABLE purchases ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMP NULL DEFAULT NULL", () => { });
+            db.query("ALTER TABLE invoices ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMP NULL DEFAULT NULL", () => { });
+            settlementService.ensureSchema().catch((schemaErr) => {
+                console.error("[SETTLEMENT_SCHEMA_INIT_ERROR]", schemaErr.message);
+            });
+            inventoryLedgerService.ensureSchema().catch((schemaErr) => {
+                console.error("[INVENTORY_LEDGER_SCHEMA_INIT_ERROR]", schemaErr.message);
+            });
+            invoicePurchaseService.ensureSchema().catch((schemaErr) => {
+                console.error("[INVOICE_PURCHASE_SCHEMA_INIT_ERROR]", schemaErr.message);
+            });
+            auditService.ensureSchema().catch((schemaErr) => {
+                console.error("[AUDIT_SCHEMA_INIT_ERROR]", schemaErr.message);
+            });
+            accountingControlService.ensureSchema().catch((schemaErr) => {
+                console.error("[ACCOUNTING_CONTROL_SCHEMA_INIT_ERROR]", schemaErr.message);
+            });
+            journalService.ensureSchema().catch((schemaErr) => {
+                console.error("[JOURNAL_SCHEMA_INIT_ERROR]", schemaErr.message);
+            });
+            taxService.ensureSchema().catch((schemaErr) => {
+                console.error("[TAX_SCHEMA_INIT_ERROR]", schemaErr.message);
+            });
+            salesInvoiceService.ensureSchema().catch((schemaErr) => {
+                console.error("[SALES_INVOICE_SCHEMA_INIT_ERROR]", schemaErr.message);
+            });
+            purchaseBillService.ensureSchema().catch((schemaErr) => {
+                console.error("[PURCHASE_BILL_SCHEMA_INIT_ERROR]", schemaErr.message);
+            });
             console.log("? Database tables ready");
         }
     });
 }
 
-// ===========================================================
-// DEBUG ROUTE  (open in browser to verify DB state)
-// ===========================================================
-app.get("/api/debug/users", (req, res) => {
-    db.query(
-        "SELECT id, name, email, LEFT(password_hash, 20) AS hash_preview, created_at FROM profiles",
-        (err, rows) => {
-            if (err) return res.status(500).json({ error: err.message });
-            res.json({ count: rows.length, users: rows });
-        }
-    );
-});
+app.use(createAuditRequestMiddleware(auditService, {
+    resolveActorUserId: extractUserIdFromToken,
+}));
 
 app.get("/api/system/email-status", (_req, res) => {
     res.json(getEmailConfigStatus());
@@ -411,7 +583,7 @@ app.get("/api/accounts/registered", authenticate, (req, res) => {
     db.query(
         `SELECT id, name, email, business_name
          FROM profiles
-         WHERE id <> ?
+         WHERE id <> ? AND is_admin = 0
          ORDER BY COALESCE(business_name, name, email) ASC`,
         [req.user.id],
         (err, rows) => {
@@ -421,26 +593,29 @@ app.get("/api/accounts/registered", authenticate, (req, res) => {
     );
 });
 
+app.use("/api", paymentRoutes);
+app.use("/api/accounting", salesInvoiceRoutes);
+app.use("/api/accounting", purchaseBillRoutes);
+app.use("/api", inventoryRoutes);
+
 // ===========================================================
 // DATA MANAGEMENT
 // ===========================================================
 
 // Clear financial data for the logged-in user
 app.delete("/api/data/clear-financials", authenticate, (req, res) => {
-    const uid = req.user.id;
-    const tables = ["payables", "purchases", "sales"];
-    let done = 0;
-    let hadError = null;
-
-    tables.forEach((tbl) => {
-        db.query(`DELETE FROM ${tbl} WHERE user_id = ?`, [uid], (err) => {
-            if (err) hadError = err.message;
-            if (++done === tables.length) {
-                if (hadError) return res.status(500).json({ message: hadError });
-                res.json({ message: "Payables, purchases and sales cleared successfully" });
-            }
-        });
-    });
+    auditService.logAction({
+        actorUserId: req.user.id,
+        companyId: req.user.id,
+        entityType: "financial_data",
+        actionType: "delete_attempt",
+        reason: "Attempted use of disabled clear-financials endpoint",
+        ipAddress: getRequestMeta(req).ipAddress,
+        userAgent: getRequestMeta(req).userAgent,
+        route: getRequestMeta(req).route,
+        method: getRequestMeta(req).method,
+    }).catch(() => { });
+    res.status(410).json({ message: "Endpoint disabled in production-hardening mode" });
 });
 
 // ===========================================================
@@ -584,6 +759,7 @@ function handleVerifySignupOtp(req, res) {
 function handleLogin(req, res) {
     const { email, password } = req.body;
     console.log(`[LOGIN] attempt email=${email}`);
+    const requestMeta = getRequestMeta(req);
 
     if (!email || !password)
         return res.status(400).json({ message: "Email and password are required" });
@@ -601,8 +777,20 @@ function handleLogin(req, res) {
 
             console.log(`[LOGIN] found ${rows.length} row(s) for ${normalEmail}`);
 
-            if (!rows.length)
+            if (!rows.length) {
+                auditService.logAction({
+                    entityType: "auth_session",
+                    actionType: "login",
+                    reason: "Invalid credentials",
+                    newValues: { email: normalEmail, outcome: "invalid_email" },
+                    ipAddress: requestMeta.ipAddress,
+                    userAgent: requestMeta.userAgent,
+                    route: requestMeta.route,
+                    method: requestMeta.method,
+                    statusCode: 401,
+                }).catch(() => { });
                 return res.status(401).json({ message: "Invalid credentials" });
+            }
 
             const user = rows[0];
 
@@ -614,8 +802,23 @@ function handleLogin(req, res) {
 
                 console.log(`[LOGIN] password match=${match}`);
 
-                if (!match)
+                if (!match) {
+                    auditService.logAction({
+                        actorUserId: user.id,
+                        companyId: user.id,
+                        entityType: "auth_session",
+                        entityId: user.id,
+                        actionType: "login",
+                        reason: "Invalid credentials",
+                        newValues: { email: normalEmail, outcome: "invalid_password" },
+                        ipAddress: requestMeta.ipAddress,
+                        userAgent: requestMeta.userAgent,
+                        route: requestMeta.route,
+                        method: requestMeta.method,
+                        statusCode: 401,
+                    }).catch(() => { });
                     return res.status(401).json({ message: "Invalid credentials" });
+                }
 
                 const token = jwt.sign(
                     { id: user.id, email: user.email },
@@ -623,6 +826,20 @@ function handleLogin(req, res) {
                     { expiresIn: "7d" }
                 );
                 console.log(`[LOGIN] ✅ success ${normalEmail}`);
+                auditService.logAction({
+                    actorUserId: user.id,
+                    companyId: user.id,
+                    entityType: "auth_session",
+                    entityId: user.id,
+                    actionType: "login",
+                    reason: "User login successful",
+                    newValues: { email: user.email, outcome: "success", is_admin: !!user.is_admin },
+                    ipAddress: requestMeta.ipAddress,
+                    userAgent: requestMeta.userAgent,
+                    route: requestMeta.route,
+                    method: requestMeta.method,
+                    statusCode: 200,
+                }).catch(() => { });
                 res.json({
                     message: "Login successful",
                     token,
@@ -780,6 +997,122 @@ app.get("/api/inventory", authenticate, (req, res) => {
     );
 });
 
+app.get("/api/stock/balances", authenticate, async (req, res) => {
+    try {
+        const rows = await inventoryLedgerService.getStockBalances(req.user.id);
+        res.json(rows);
+    } catch (err) {
+        res.status(500).json({ message: err.message });
+    }
+});
+
+app.get("/api/items", authenticate, (req, res) => {
+    db.query(
+        `SELECT * FROM items WHERE company_id=? AND is_active=1 ORDER BY name ASC`,
+        [req.user.id],
+        (err, rows) => {
+            if (err) return res.status(500).json({ message: err.message });
+            res.json(rows);
+        }
+    );
+});
+
+app.post("/api/items", authenticate, async (req, res) => {
+    try {
+        const { name, sku, description, default_purchase_price, default_selling_price } = req.body;
+        if (!name) return res.status(400).json({ message: "name is required" });
+
+        const item = await inventoryLedgerService.findOrCreateItem({
+            companyId: req.user.id,
+            name,
+            sku: sku || null,
+            description: description || null,
+            defaultPurchasePrice: Number(default_purchase_price || 0),
+            defaultSellingPrice: Number(default_selling_price || 0),
+            newId,
+        });
+
+        res.status(201).json(item);
+    } catch (err) {
+        res.status(400).json({ message: err.message });
+    }
+});
+
+app.get("/api/warehouses", authenticate, (req, res) => {
+    db.query(
+        `SELECT * FROM warehouses WHERE company_id=? AND is_active=1 ORDER BY is_default DESC, name ASC`,
+        [req.user.id],
+        (err, rows) => {
+            if (err) return res.status(500).json({ message: err.message });
+            res.json(rows);
+        }
+    );
+});
+
+app.post("/api/warehouses", authenticate, (req, res) => {
+    const { name, code } = req.body;
+    if (!name || !code) return res.status(400).json({ message: "name and code are required" });
+
+    const id = newId();
+    db.query(
+        `INSERT INTO warehouses (id, company_id, name, code, is_default, is_active)
+         VALUES (?, ?, ?, ?, 0, 1)`,
+        [id, req.user.id, name, code],
+        (err) => {
+            if (err) return res.status(400).json({ message: err.message });
+            db.query("SELECT * FROM warehouses WHERE id=?", [id], (_e, rows) => res.status(201).json(rows[0]));
+        }
+    );
+});
+
+app.post("/api/stock/adjustment", authenticate, async (req, res) => {
+    try {
+        const { item_id, quantity_delta, unit_cost, reason } = req.body;
+        if (!item_id || quantity_delta === undefined) {
+            return res.status(400).json({ message: "item_id and quantity_delta are required" });
+        }
+
+        const result = await inventoryLedgerService.applyAdjustment({
+            companyId: req.user.id,
+            itemId: item_id,
+            quantityDelta: Number(quantity_delta),
+            unitCost: unit_cost === undefined ? null : Number(unit_cost),
+            reason: reason || "Manual inventory adjustment",
+            createdByUserId: req.user.id,
+            newId,
+        });
+
+        res.status(201).json(result);
+    } catch (err) {
+        res.status(400).json({ message: err.message });
+    }
+});
+
+app.post("/api/stock/transfer", authenticate, async (req, res) => {
+    try {
+        const { item_id, from_warehouse_id, to_warehouse_id, quantity, unit_cost, reason } = req.body;
+        if (!item_id || !from_warehouse_id || !to_warehouse_id || !quantity) {
+            return res.status(400).json({ message: "item_id, from_warehouse_id, to_warehouse_id and quantity are required" });
+        }
+
+        const result = await inventoryLedgerService.applyTransfer({
+            companyId: req.user.id,
+            itemId: item_id,
+            fromWarehouseId: from_warehouse_id,
+            toWarehouseId: to_warehouse_id,
+            quantity: Number(quantity),
+            unitCost: unit_cost === undefined ? null : Number(unit_cost),
+            reason: reason || "Warehouse transfer",
+            createdByUserId: req.user.id,
+            newId,
+        });
+
+        res.status(201).json(result);
+    } catch (err) {
+        res.status(400).json({ message: err.message });
+    }
+});
+
 app.post("/api/inventory", authenticate, (req, res) => {
     const { linked_vendor_profile_id, vendor_product_id, stock_quantity, purchase_price, selling_price, payment_type } = req.body;
 
@@ -865,18 +1198,6 @@ app.post("/api/inventory", authenticate, (req, res) => {
                                     (pErr) => { if (pErr) console.error("[AUTO-PURCHASE]", pErr.message); }
                                 );
 
-                                if (pType === "credit" && totalCost > 0) {
-                                    const payableId = newId();
-                                    const dueDate = new Date();
-                                    dueDate.setDate(dueDate.getDate() + 30);
-                                    db.query(
-                                        `INSERT INTO payables
-                                         (id, user_id, vendor_name, invoice_id, amount, due_date, status)
-                                         VALUES (?, ?, ?, ?, ?, ?, 'pending')`,
-                                        [payableId, req.user.id, vendorRows[0].vendor_name, purchaseId, totalCost, dueDate.toISOString().slice(0, 10)],
-                                        (pyErr) => { if (pyErr) console.error("[AUTO-PAYABLE]", pyErr.message); }
-                                    );
-                                }
                             }
 
                             db.query("SELECT * FROM inventory WHERE id = ?", [invId], (_e, rows) => res.status(201).json(rows[0]));
@@ -954,41 +1275,19 @@ app.put("/api/inventory/:id", authenticate, (req, res) => {
 });
 
 app.delete("/api/inventory/:id", authenticate, (req, res) => {
-    db.query(
-        "SELECT * FROM inventory WHERE id=? AND user_id=?",
-        [req.params.id, req.user.id],
-        (fErr, fRows) => {
-            if (fErr) return res.status(500).json({ message: fErr.message });
-            if (!fRows.length) return res.status(404).json({ message: "Item not found" });
-
-            const item = fRows[0];
-
-            db.query(
-                "DELETE FROM inventory WHERE id=? AND user_id=?",
-                [req.params.id, req.user.id],
-                (err, result) => {
-                    if (err) return res.status(500).json({ message: err.message });
-                    if (!result.affectedRows) return res.status(404).json({ message: "Item not found" });
-
-                    if (item.linked_purchase_id) {
-                        db.query(
-                            "DELETE FROM payables WHERE user_id=? AND invoice_id=?",
-                            [req.user.id, item.linked_purchase_id],
-                            (pyErr) => { if (pyErr) console.error("[AUTO-DEL-PAYABLE-INV]", pyErr.message); }
-                        );
-
-                        db.query(
-                            "DELETE FROM purchases WHERE user_id=? AND id=?",
-                            [req.user.id, item.linked_purchase_id],
-                            (pErr) => { if (pErr) console.error("[AUTO-DEL-PURCHASE]", pErr.message); }
-                        );
-                    }
-
-                    res.json({ message: "Deleted successfully" });
-                }
-            );
-        }
-    );
+    auditService.logAction({
+        actorUserId: req.user.id,
+        companyId: req.user.id,
+        entityType: "inventory_item",
+        entityId: req.params.id,
+        actionType: "delete_attempt",
+        reason: "Legacy inventory hard delete blocked",
+        ipAddress: getRequestMeta(req).ipAddress,
+        userAgent: getRequestMeta(req).userAgent,
+        route: getRequestMeta(req).route,
+        method: getRequestMeta(req).method,
+    }).catch(() => { });
+    return res.status(409).json({ message: "Inventory items cannot be hard deleted. Use stock adjustments or deactivate the item instead." });
 });
 
 app.post("/api/inventory", authenticate, (req, res) => {
@@ -1043,20 +1342,6 @@ app.post("/api/inventory", authenticate, (req, res) => {
                     (pErr) => { if (pErr) console.error("[AUTO-PURCHASE]", pErr.message); }
                 );
 
-                // ── AUTO: create payable if credit purchase ──
-                if (pType === "credit" && totalCost > 0) {
-                    const payableId = newId();
-                    const dueDate = new Date();
-                    dueDate.setDate(dueDate.getDate() + 30); // due in 30 days
-                    db.query(
-                        `INSERT INTO payables
-                         (id, user_id, vendor_name, invoice_id, amount, due_date, status)
-                         VALUES (?, ?, ?, ?, ?, ?, 'pending')`,
-                        [payableId, req.user.id, vName,
-                            purchaseId, totalCost, dueDate.toISOString().slice(0, 10)],
-                        (pyErr) => { if (pyErr) console.error("[AUTO-PAYABLE]", pyErr.message); }
-                    );
-                }
             }
 
             db.query("SELECT * FROM inventory WHERE id = ?", [invId], (e, rows) => res.status(201).json(rows[0]));
@@ -1084,45 +1369,19 @@ app.put("/api/inventory/:id", authenticate, (req, res) => {
 });
 
 app.delete("/api/inventory/:id", authenticate, (req, res) => {
-    // Fetch inventory first to get linked purchase/payable info
-    db.query(
-        "SELECT * FROM inventory WHERE id=? AND user_id=?",
-        [req.params.id, req.user.id],
-        (fErr, fRows) => {
-            if (fErr) return res.status(500).json({ message: fErr.message });
-            if (!fRows.length) return res.status(404).json({ message: "Item not found" });
-
-            const item = fRows[0];
-
-            db.query(
-                "DELETE FROM inventory WHERE id=? AND user_id=?",
-                [req.params.id, req.user.id],
-                (err, result) => {
-                    if (err) return res.status(500).json({ message: err.message });
-                    if (!result.affectedRows) return res.status(404).json({ message: "Item not found" });
-
-                    // ── AUTO: delete linked purchase records for this product ──
-                    db.query(
-                        `DELETE FROM purchases WHERE user_id=? AND product_name=? AND vendor_name=?`,
-                        [req.user.id, item.product_name, item.vendor_name || "Unknown Vendor"],
-                        (pErr) => { if (pErr) console.error("[AUTO-DEL-PURCHASE]", pErr.message); }
-                    );
-
-                    // ── AUTO: delete linked payables for this vendor+product combo ──
-                    db.query(
-                        `DELETE FROM payables WHERE user_id=? AND vendor_name=?
-                         AND invoice_id IN
-                         (SELECT id FROM (SELECT id FROM purchases WHERE user_id=? AND product_name=?) AS p)`,
-                        [req.user.id, item.vendor_name || "Unknown Vendor",
-                        req.user.id, item.product_name],
-                        (pyErr) => { if (pyErr) console.error("[AUTO-DEL-PAYABLE-INV]", pyErr.message); }
-                    );
-
-                    res.json({ message: "Deleted successfully" });
-                }
-            );
-        }
-    );
+    auditService.logAction({
+        actorUserId: req.user.id,
+        companyId: req.user.id,
+        entityType: "inventory_item",
+        entityId: req.params.id,
+        actionType: "delete_attempt",
+        reason: "Legacy inventory hard delete blocked",
+        ipAddress: getRequestMeta(req).ipAddress,
+        userAgent: getRequestMeta(req).userAgent,
+        route: getRequestMeta(req).route,
+        method: getRequestMeta(req).method,
+    }).catch(() => { });
+    return res.status(409).json({ message: "Inventory items cannot be hard deleted. Use stock adjustments or deactivate the item instead." });
 });
 
 // ===========================================================
@@ -1131,7 +1390,7 @@ app.delete("/api/inventory/:id", authenticate, (req, res) => {
 
 app.get("/api/invoices", authenticate, (req, res) => {
     db.query(
-        "SELECT * FROM invoices WHERE user_id = ? ORDER BY created_at DESC",
+        "SELECT * FROM invoices WHERE user_id = ? AND status!='cancelled' ORDER BY created_at DESC",
         [req.user.id],
         (err, rows) => {
             if (err) return res.status(500).json({ message: err.message });
@@ -1142,7 +1401,7 @@ app.get("/api/invoices", authenticate, (req, res) => {
 
 app.post("/api/invoices", authenticate, (req, res) => {
     const { invoice_no, client_name, amount, tax_amount, total_amount,
-        status, invoice_date, due_date, notes } = req.body;
+        status, invoice_date, due_date, notes, items } = req.body;
 
     if (!invoice_no || !client_name || !amount || !due_date)
         return res.status(400).json({ message: "invoice_no, client_name, amount and due_date are required" });
@@ -1159,32 +1418,25 @@ app.post("/api/invoices", authenticate, (req, res) => {
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [id, req.user.id, invoice_no, client_name, amount, tax_amount || 0,
             finalTotal, finalStatus, invoice_date || today, due_date, notes || null],
-        (err) => {
+        async (err) => {
             if (err) return res.status(500).json({ message: err.message });
 
-            // ── AUTO: create receivable ──
-            const recId = newId();
-            db.query(
-                `INSERT INTO receivables
-                 (id, user_id, client_name, invoice_id, amount, due_date, status)
-                 VALUES (?, ?, ?, ?, ?, ?, 'pending')`,
-                [recId, req.user.id, client_name, invoice_no, finalTotal, due_date],
-                (rErr) => { if (rErr) console.error("[AUTO-RECEIVABLE]", rErr.message); }
-            );
-
-            // ── AUTO: if created as 'paid', also create sale ──
-            if (finalStatus === "paid") {
-                const saleId = newId();
-                db.query(
-                    `INSERT INTO sales (id, user_id, client_name, amount, sale_date, notes)
-                     VALUES (?, ?, ?, ?, ?, ?)`,
-                    [saleId, req.user.id, client_name, finalTotal, today, `Invoice ${invoice_no}`],
-                    (sErr) => { if (sErr) console.error("[AUTO-SALE]", sErr.message); }
-                );
-                db.query(
-                    "UPDATE receivables SET status='paid' WHERE invoice_id=? AND user_id=?",
-                    [invoice_no, req.user.id], () => { }
-                );
+            try {
+                if (Array.isArray(items) && items.length) {
+                    await inventoryLedgerService.applySaleIssue({
+                        companyId: req.user.id,
+                        invoiceId: id,
+                        lines: items,
+                        createdByUserId: req.user.id,
+                        newId,
+                        costingMethod: "weighted_average",
+                    });
+                }
+            } catch (stockErr) {
+                db.query("UPDATE invoices SET status='cancelled', deleted_at=NOW() WHERE id=? AND user_id=?", [id, req.user.id], () => {
+                    return res.status(400).json({ message: stockErr.message });
+                });
+                return;
             }
 
             db.query("SELECT * FROM invoices WHERE id = ?", [id], (e, rows) => res.status(201).json(rows[0]));
@@ -1195,305 +1447,36 @@ app.post("/api/invoices", authenticate, (req, res) => {
 app.put("/api/invoices/:id", authenticate, (req, res) => {
     const invoiceId = req.params.id;
     const userId = req.user.id;
+    const { invoice_no, client_name, amount, tax_amount, total_amount,
+        status, invoice_date, due_date, payment_date, notes } = req.body;
+    const finalTotal = parseFloat(total_amount || amount);
 
-    // Fetch current row first so we can detect status change
-    db.query("SELECT * FROM invoices WHERE id=? AND user_id=?", [invoiceId, userId], (fErr, fRows) => {
-        if (fErr) return res.status(500).json({ message: fErr.message });
-        if (!fRows.length) return res.status(404).json({ message: "Invoice not found" });
-
-        const prev = fRows[0];
-        const { invoice_no, client_name, amount, tax_amount, total_amount,
-            status, invoice_date, due_date, payment_date, notes } = req.body;
-        const finalTotal = parseFloat(total_amount || amount);
-        const today = new Date().toISOString().slice(0, 10);
-
-        db.query(
-            `UPDATE invoices
+    db.query(
+        `UPDATE invoices
          SET invoice_no=?, client_name=?, amount=?, tax_amount=?, total_amount=?,
              status=?, invoice_date=?, due_date=?, payment_date=?, notes=?, updated_at=NOW()
          WHERE id=? AND user_id=?`,
-            [invoice_no, client_name, amount, tax_amount || 0, finalTotal,
-                status, invoice_date, due_date, payment_date || null, notes || null,
-                invoiceId, userId],
-            (err, result) => {
-                if (err) return res.status(500).json({ message: err.message });
-                if (!result.affectedRows) return res.status(404).json({ message: "Invoice not found" });
-
-                // ── AUTO: invoice just marked as PAID ──
-                if (status === "paid" && prev.status !== "paid") {
-                    // Create sale record
-                    const saleId = newId();
-                    db.query(
-                        `INSERT INTO sales (id, user_id, client_name, amount, sale_date, notes)
-                         VALUES (?, ?, ?, ?, ?, ?)`,
-                        [saleId, userId, client_name, finalTotal,
-                            payment_date || today, `Invoice ${invoice_no}`],
-                        (sErr) => { if (sErr) console.error("[AUTO-SALE]", sErr.message); }
-                    );
-                    // Sync receivable → paid
-                    db.query(
-                        "UPDATE receivables SET status='paid' WHERE invoice_id=? AND user_id=?",
-                        [invoice_no || prev.invoice_no, userId], () => { }
-                    );
-                }
-
-                // ── AUTO: invoice un-paid (paid → something else) ──
-                if (prev.status === "paid" && status !== "paid") {
-                    db.query(
-                        "UPDATE receivables SET status='pending' WHERE invoice_id=? AND user_id=?",
-                        [invoice_no || prev.invoice_no, userId], () => { }
-                    );
-                }
-
-                db.query("SELECT * FROM invoices WHERE id = ?", [invoiceId], (e, rows) => res.json(rows[0]));
-            }
-        );
-    });
+        [invoice_no, client_name, amount, tax_amount || 0, finalTotal,
+            status, invoice_date, due_date, payment_date || null, notes || null,
+            invoiceId, userId],
+        (err, result) => {
+            if (err) return res.status(500).json({ message: err.message });
+            if (!result.affectedRows) return res.status(404).json({ message: "Invoice not found" });
+            db.query("SELECT * FROM invoices WHERE id = ?", [invoiceId], (e, rows) => res.json(rows[0]));
+        }
+    );
 });
 
 app.delete("/api/invoices/:id", authenticate, (req, res) => {
-    // Fetch invoice to get invoice_no before deletion (for receivable cleanup)
     db.query(
-        "SELECT invoice_no FROM invoices WHERE id=? AND user_id=?",
+        "UPDATE invoices SET status='cancelled', deleted_at=NOW(), updated_at=NOW() WHERE id=? AND user_id=? AND status!='paid'",
         [req.params.id, req.user.id],
-        (fErr, fRows) => {
-            if (fErr) return res.status(500).json({ message: fErr.message });
-            if (!fRows.length) return res.status(404).json({ message: "Invoice not found" });
-
-            const invoiceNo = fRows[0].invoice_no;
-
-            db.query(
-                "DELETE FROM invoices WHERE id=? AND user_id=?",
-                [req.params.id, req.user.id],
-                (err) => {
-                    if (err) return res.status(500).json({ message: err.message });
-
-                    // ── AUTO: delete linked receivable ──
-                    db.query(
-                        "DELETE FROM receivables WHERE invoice_id=? AND user_id=?",
-                        [invoiceNo, req.user.id],
-                        (rErr) => { if (rErr) console.error("[AUTO-DEL-RECEIVABLE]", rErr.message); }
-                    );
-
-                    res.json({ message: "Invoice deleted and receivable removed" });
-                }
-            );
+        (err, result) => {
+            if (err) return res.status(500).json({ message: err.message });
+            if (!result.affectedRows) return res.status(404).json({ message: "Invoice not found" });
+            res.json({ message: "Invoice cancelled" });
         }
     );
-});
-
-// ===========================================================
-// RECEIVABLES
-// ===========================================================
-
-// Helper: auto-mark overdue receivables for a user
-function syncOverdueReceivables(userId) {
-    db.query(
-        `UPDATE receivables
-         SET status = 'overdue',
-             days_overdue = DATEDIFF(CURDATE(), due_date)
-         WHERE user_id = ? AND status = 'pending' AND due_date < CURDATE()`,
-        [userId], (e) => { if (e) console.error("[OVERDUE-REC]", e.message); }
-    );
-    // Also reset days_overdue for pending not-yet-due records
-    db.query(
-        `UPDATE receivables SET days_overdue = 0
-         WHERE user_id = ? AND status = 'pending' AND due_date >= CURDATE()`,
-        [userId], () => { }
-    );
-}
-
-app.get("/api/receivables", authenticate, (req, res) => {
-    // Sync overdue status before returning
-    syncOverdueReceivables(req.user.id);
-    db.query("SELECT * FROM receivables WHERE user_id = ? ORDER BY due_date ASC",
-        [req.user.id], (err, rows) => {
-            if (err) return res.status(500).json({ message: err.message });
-            res.json(rows);
-        });
-});
-
-app.post("/api/receivables", authenticate, (req, res) => {
-    const { client_name, invoice_id, amount, due_date, status } = req.body;
-    if (!client_name || !amount || !due_date)
-        return res.status(400).json({ message: "client_name, amount and due_date are required" });
-
-    const id = newId();
-    db.query(
-        "INSERT INTO receivables (id, user_id, client_name, invoice_id, amount, due_date, status) VALUES (?, ?, ?, ?, ?, ?, ?)",
-        [id, req.user.id, client_name, invoice_id || null, amount, due_date, status || "pending"],
-        (err) => {
-            if (err) return res.status(500).json({ message: err.message });
-            db.query("SELECT * FROM receivables WHERE id = ?", [id], (e, rows) => res.status(201).json(rows[0]));
-        }
-    );
-});
-
-app.put("/api/receivables/:id", authenticate, (req, res) => {
-    const recId = req.params.id;
-    const userId = req.user.id;
-
-    // Fetch current to detect status change
-    db.query("SELECT * FROM receivables WHERE id=? AND user_id=?", [recId, userId], (fErr, fRows) => {
-        if (fErr) return res.status(500).json({ message: fErr.message });
-        if (!fRows.length) return res.status(404).json({ message: "Not found" });
-
-        const prev = fRows[0];
-        const { client_name, invoice_id, amount, due_date, status } = req.body;
-        const today = new Date().toISOString().slice(0, 10);
-
-        db.query(
-            "UPDATE receivables SET client_name=?, invoice_id=?, amount=?, due_date=?, status=?, updated_at=NOW() WHERE id=? AND user_id=?",
-            [client_name, invoice_id || null, amount, due_date, status, recId, userId],
-            (err, result) => {
-                if (err) return res.status(500).json({ message: err.message });
-                if (!result.affectedRows) return res.status(404).json({ message: "Not found" });
-
-                // ── AUTO: receivable marked as paid → create sale record ──
-                if (status === "paid" && prev.status !== "paid") {
-                    const saleId = newId();
-                    db.query(
-                        `INSERT INTO sales (id, user_id, client_name, amount, sale_date, notes)
-                         VALUES (?, ?, ?, ?, ?, ?)`,
-                        [saleId, userId, client_name || prev.client_name,
-                            amount || prev.amount, today,
-                            invoice_id ? `Receivable for Invoice ${invoice_id}` : "Direct payment received"],
-                        (sErr) => { if (sErr) console.error("[AUTO-SALE-FROM-REC]", sErr.message); }
-                    );
-                    // Sync the linked invoice status → paid (if linked)
-                    if (invoice_id || prev.invoice_id) {
-                        db.query(
-                            "UPDATE invoices SET status='paid', payment_date=?, updated_at=NOW() WHERE invoice_no=? AND user_id=? AND status!='paid'",
-                            [today, invoice_id || prev.invoice_id, userId], () => { }
-                        );
-                    }
-                }
-
-                // ── AUTO: receivable un-paid → sync invoice back to pending ──
-                if (prev.status === "paid" && status !== "paid") {
-                    if (invoice_id || prev.invoice_id) {
-                        db.query(
-                            "UPDATE invoices SET status='pending', payment_date=NULL, updated_at=NOW() WHERE invoice_no=? AND user_id=?",
-                            [invoice_id || prev.invoice_id, userId], () => { }
-                        );
-                    }
-                }
-
-                db.query("SELECT * FROM receivables WHERE id = ?", [recId], (e, rows) => res.json(rows[0]));
-            }
-        );
-    });
-});
-
-app.delete("/api/receivables/:id", authenticate, (req, res) => {
-    db.query("DELETE FROM receivables WHERE id=? AND user_id=?",
-        [req.params.id, req.user.id], (err, result) => {
-            if (err) return res.status(500).json({ message: err.message });
-            if (!result.affectedRows) return res.status(404).json({ message: "Not found" });
-            res.json({ message: "Deleted successfully" });
-        });
-});
-
-// ===========================================================
-// PAYABLES
-// ===========================================================
-
-// Helper: auto-mark overdue payables for a user
-function syncOverduePayables(userId) {
-    db.query(
-        `UPDATE payables
-         SET status = 'overdue',
-             days_overdue = DATEDIFF(CURDATE(), due_date)
-         WHERE user_id = ? AND status = 'pending' AND due_date < CURDATE()`,
-        [userId], (e) => { if (e) console.error("[OVERDUE-PAY]", e.message); }
-    );
-    db.query(
-        `UPDATE payables SET days_overdue = 0
-         WHERE user_id = ? AND status = 'pending' AND due_date >= CURDATE()`,
-        [userId], () => { }
-    );
-}
-
-app.get("/api/payables", authenticate, (req, res) => {
-    syncOverduePayables(req.user.id);
-    db.query("SELECT * FROM payables WHERE user_id = ? ORDER BY due_date ASC",
-        [req.user.id], (err, rows) => {
-            if (err) return res.status(500).json({ message: err.message });
-            res.json(rows);
-        });
-});
-
-app.post("/api/payables", authenticate, (req, res) => {
-    const { vendor_name, invoice_id, amount, due_date, status } = req.body;
-    if (!vendor_name || !amount || !due_date)
-        return res.status(400).json({ message: "vendor_name, amount and due_date are required" });
-
-    const id = newId();
-    db.query(
-        "INSERT INTO payables (id, user_id, vendor_name, invoice_id, amount, due_date, status) VALUES (?, ?, ?, ?, ?, ?, ?)",
-        [id, req.user.id, vendor_name, invoice_id || null, amount, due_date, status || "pending"],
-        (err) => {
-            if (err) return res.status(500).json({ message: err.message });
-            db.query("SELECT * FROM payables WHERE id = ?", [id], (e, rows) => res.status(201).json(rows[0]));
-        }
-    );
-});
-
-app.put("/api/payables/:id", authenticate, (req, res) => {
-    const payId = req.params.id;
-    const userId = req.user.id;
-
-    // Fetch current to detect status change
-    db.query("SELECT * FROM payables WHERE id=? AND user_id=?", [payId, userId], (fErr, fRows) => {
-        if (fErr) return res.status(500).json({ message: fErr.message });
-        if (!fRows.length) return res.status(404).json({ message: "Not found" });
-
-        const prev = fRows[0];
-        const { vendor_name, invoice_id, amount, due_date, status } = req.body;
-
-        db.query(
-            "UPDATE payables SET vendor_name=?, invoice_id=?, amount=?, due_date=?, status=?, updated_at=NOW() WHERE id=? AND user_id=?",
-            [vendor_name, invoice_id || null, amount, due_date, status, payId, userId],
-            (err, result) => {
-                if (err) return res.status(500).json({ message: err.message });
-                if (!result.affectedRows) return res.status(404).json({ message: "Not found" });
-
-                // ── AUTO: payable paid → sync linked purchase payment_status ──
-                if (status === "paid" && prev.status !== "paid" && (invoice_id || prev.invoice_id)) {
-                    db.query(
-                        "UPDATE purchases SET payment_status='paid' WHERE id=? AND user_id=?",
-                        [invoice_id || prev.invoice_id, userId],
-                        (pErr) => { if (pErr) console.error("[AUTO-PURCH-PAID]", pErr.message); }
-                    );
-                }
-
-                // ── AUTO: payable un-paid → revert purchase to pending ──
-                if (prev.status === "paid" && status !== "paid" && (invoice_id || prev.invoice_id)) {
-                    db.query(
-                        "UPDATE purchases SET payment_status='pending' WHERE id=? AND user_id=?",
-                        [invoice_id || prev.invoice_id, userId], () => { }
-                    );
-                }
-
-                db.query("SELECT * FROM payables WHERE id = ?", [payId], (e, rows) => res.json(rows[0]));
-            }
-        );
-    });
-});
-
-app.delete("/api/payables/:id", authenticate, (req, res) => {
-    // Fetch payable first to get linked purchase_id
-    db.query("SELECT invoice_id FROM payables WHERE id=? AND user_id=?",
-        [req.params.id, req.user.id], (fErr, fRows) => {
-            if (fErr) return res.status(500).json({ message: fErr.message });
-
-            db.query("DELETE FROM payables WHERE id=? AND user_id=?",
-                [req.params.id, req.user.id], (err, result) => {
-                    if (err) return res.status(500).json({ message: err.message });
-                    if (!result.affectedRows) return res.status(404).json({ message: "Not found" });
-                    res.json({ message: "Deleted successfully" });
-                });
-        });
 });
 
 // ===========================================================
@@ -1521,17 +1504,6 @@ app.post("/api/sales", authenticate, (req, res) => {
         [id, req.user.id, client_name, amount, sale_date || today, notes || null],
         (err) => {
             if (err) return res.status(500).json({ message: err.message });
-
-            // ── AUTO: direct cash sale → create a paid receivable (history trail) ──
-            const recId = newId();
-            db.query(
-                `INSERT INTO receivables
-                 (id, user_id, client_name, invoice_id, amount, due_date, status)
-                 VALUES (?, ?, ?, ?, ?, ?, 'paid')`,
-                [recId, req.user.id, client_name, null, amount, sale_date || today],
-                (rErr) => { if (rErr) console.error("[AUTO-REC-SALE]", rErr.message); }
-            );
-
             db.query("SELECT * FROM sales WHERE id = ?", [id], (e, rows) => res.status(201).json(rows[0]));
         }
     );
@@ -1542,7 +1514,7 @@ app.post("/api/sales", authenticate, (req, res) => {
 // ===========================================================
 
 app.get("/api/purchases", authenticate, (req, res) => {
-    db.query("SELECT * FROM purchases WHERE user_id = ? ORDER BY purchase_date DESC",
+    db.query("SELECT * FROM purchases WHERE user_id = ? AND COALESCE(status,'posted')!='void' ORDER BY purchase_date DESC",
         [req.user.id], (err, rows) => {
             if (err) return res.status(500).json({ message: err.message });
             res.json(rows);
@@ -1551,7 +1523,7 @@ app.get("/api/purchases", authenticate, (req, res) => {
 
 app.post("/api/purchases", authenticate, (req, res) => {
     const { vendor_name, product_name, quantity, amount, purchase_date,
-        payment_type, payment_status, notes } = req.body;
+        payment_type, payment_status, notes, sku } = req.body;
     if (!vendor_name || !product_name || !amount)
         return res.status(400).json({ message: "vendor_name, product_name and amount are required" });
 
@@ -1567,22 +1539,25 @@ app.post("/api/purchases", authenticate, (req, res) => {
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [id, req.user.id, vendor_name, product_name, quantity || 1, amount,
             purchase_date || today, pType, pStat, notes || null],
-        (err) => {
+        async (err) => {
             if (err) return res.status(500).json({ message: err.message });
 
-            // ── AUTO: credit purchase → create payable ──
-            if (pType === "credit") {
-                const payableId = newId();
-                const dueDate = new Date();
-                dueDate.setDate(dueDate.getDate() + 30);
-                db.query(
-                    `INSERT INTO payables
-                     (id, user_id, vendor_name, invoice_id, amount, due_date, status)
-                     VALUES (?, ?, ?, ?, ?, ?, 'pending')`,
-                    [payableId, req.user.id, vendor_name, id,
-                        amount, dueDate.toISOString().slice(0, 10)],
-                    (pErr) => { if (pErr) console.error("[AUTO-PAYABLE-PURCH]", pErr.message); }
-                );
+            try {
+                await inventoryLedgerService.applyPurchaseReceipt({
+                    companyId: req.user.id,
+                    productName: product_name,
+                    sku: sku || null,
+                    quantity: Number(quantity || 1),
+                    totalAmount: Number(amount),
+                    purchaseId: id,
+                    createdByUserId: req.user.id,
+                    newId,
+                });
+            } catch (stockErr) {
+                db.query("UPDATE purchases SET status='void', deleted_at=NOW() WHERE id=? AND user_id=?", [id, req.user.id], () => {
+                    return res.status(400).json({ message: stockErr.message });
+                });
+                return;
             }
 
             db.query("SELECT * FROM purchases WHERE id = ?", [id], (e, rows) => res.status(201).json(rows[0]));
@@ -1590,22 +1565,87 @@ app.post("/api/purchases", authenticate, (req, res) => {
     );
 });
 
+// ===========================================================
+// V2 SALES INVOICES / PURCHASE BILLS (LINE ITEM MODELS)
+// ===========================================================
+
+app.post("/api/v2/sales-invoices", authenticate, async (req, res) => {
+    res.status(410).json({ message: "Legacy /api/v2 sales invoice draft endpoint disabled. Use /api/accounting/sales-invoices instead." });
+});
+
+app.post("/api/v2/purchase-bills", authenticate, async (req, res) => {
+    res.status(410).json({ message: "Legacy /api/v2 purchase bill draft endpoint disabled. Use /api/accounting/purchase-bills instead." });
+});
+
+app.post("/api/v2/sales-invoices/:id/post", authenticate, async (req, res) => {
+    res.status(410).json({ message: "Legacy /api/v2 sales invoice posting endpoint disabled. Use /api/accounting/sales-invoices/:id/post instead." });
+});
+
+app.post("/api/v2/purchase-bills/:id/post", authenticate, async (req, res) => {
+    res.status(410).json({ message: "Legacy /api/v2 purchase bill posting endpoint disabled. Use /api/accounting/purchase-bills/:id/post instead." });
+});
+
+app.get("/api/v2/sales-invoices", authenticate, (req, res) => {
+    db.query(
+        `SELECT * FROM sales_invoice_headers WHERE user_id=? ORDER BY created_at DESC`,
+        [req.user.id],
+        (err, rows) => {
+            if (err) return res.status(500).json({ message: err.message });
+            res.json(rows);
+        }
+    );
+});
+
+app.get("/api/v2/sales-invoices/:id/lines", authenticate, (req, res) => {
+    db.query(
+        `SELECT l.*
+         FROM sales_invoice_lines l
+         JOIN sales_invoice_headers h ON h.id = l.sales_invoice_id
+         WHERE h.user_id=? AND h.id=?
+         ORDER BY l.line_order ASC`,
+        [req.user.id, req.params.id],
+        (err, rows) => {
+            if (err) return res.status(500).json({ message: err.message });
+            res.json(rows);
+        }
+    );
+});
+
+app.get("/api/v2/purchase-bills", authenticate, (req, res) => {
+    db.query(
+        `SELECT * FROM purchase_bill_headers WHERE user_id=? ORDER BY created_at DESC`,
+        [req.user.id],
+        (err, rows) => {
+            if (err) return res.status(500).json({ message: err.message });
+            res.json(rows);
+        }
+    );
+});
+
+app.get("/api/v2/purchase-bills/:id/lines", authenticate, (req, res) => {
+    db.query(
+        `SELECT l.*
+         FROM purchase_bill_lines l
+         JOIN purchase_bill_headers h ON h.id = l.purchase_bill_id
+         WHERE h.user_id=? AND h.id=?
+         ORDER BY l.line_order ASC`,
+        [req.user.id, req.params.id],
+        (err, rows) => {
+            if (err) return res.status(500).json({ message: err.message });
+            res.json(rows);
+        }
+    );
+});
+
 app.delete("/api/purchases/:id", authenticate, (req, res) => {
     db.query(
-        "DELETE FROM purchases WHERE id=? AND user_id=?",
+        "UPDATE purchases SET status='void', deleted_at=NOW() WHERE id=? AND user_id=?",
         [req.params.id, req.user.id],
         (err, result) => {
             if (err) return res.status(500).json({ message: err.message });
             if (!result.affectedRows) return res.status(404).json({ message: "Not found" });
 
-            // ── AUTO: delete linked payable ──
-            db.query(
-                "DELETE FROM payables WHERE invoice_id=? AND user_id=?",
-                [req.params.id, req.user.id],
-                (pErr) => { if (pErr) console.error("[AUTO-DEL-PAYABLE]", pErr.message); }
-            );
-
-            res.json({ message: "Purchase deleted" });
+            res.json({ message: "Purchase voided" });
         }
     );
 });
@@ -1615,22 +1655,89 @@ app.delete("/api/purchases/:id", authenticate, (req, res) => {
 // ===========================================================
 
 app.get("/api/reports", authenticate, (req, res) => {
+    if (req.query.export || req.query.format) {
+        auditService.logAction({
+            actorUserId: req.user.id,
+            companyId: req.user.id,
+            entityType: "report",
+            actionType: "export",
+            reason: "Report export requested",
+            newValues: { report: "summary", query: req.query },
+            ipAddress: getRequestMeta(req).ipAddress,
+            userAgent: getRequestMeta(req).userAgent,
+            route: getRequestMeta(req).route,
+            method: getRequestMeta(req).method,
+        }).catch(() => { });
+    }
     const uid = req.user.id;
     const year = req.query.year || new Date().getFullYear();
 
-    // Sync overdue before report
-    syncOverdueReceivables(uid);
-    syncOverduePayables(uid);
-
     const q = {
         totalRevenue: `SELECT COALESCE(SUM(amount),0) AS val FROM sales WHERE user_id=?`,
-        totalExpenses: `SELECT COALESCE(SUM(amount),0) AS val FROM purchases WHERE user_id=?`,
+        totalExpenses: `SELECT COALESCE(SUM(amount),0) AS val FROM purchases WHERE user_id=? AND COALESCE(status,'posted')!='void'`,
         grossProfit: `SELECT COALESCE(SUM(amount),0)-0 AS val FROM sales WHERE user_id=?`,
-        totalReceivables: `SELECT COALESCE(SUM(amount),0) AS val FROM receivables WHERE user_id=? AND status!='paid'`,
-        totalPayables: `SELECT COALESCE(SUM(amount),0) AS val FROM payables WHERE user_id=? AND status!='paid'`,
-        overdueRec: `SELECT COUNT(*) AS val FROM receivables WHERE user_id=? AND status='overdue'`,
-        overduePay: `SELECT COUNT(*) AS val FROM payables WHERE user_id=? AND status='overdue'`,
-        totalInventoryValue: `SELECT COALESCE(SUM(purchase_price*stock_quantity),0) AS val FROM inventory WHERE user_id=?`,
+                totalReceivables: `SELECT COALESCE(SUM(x.outstanding),0) AS val
+                                                     FROM (
+                                                         SELECT (i.total_amount - COALESCE(SUM(CASE WHEN p.type='incoming' AND p.status='posted' THEN pa.allocated_amount ELSE 0 END),0)) AS outstanding
+                                                         FROM invoices i
+                                                         LEFT JOIN payment_allocations pa ON pa.invoice_id=i.id
+                                                         LEFT JOIN payments p ON p.id=pa.payment_id
+                                                         WHERE i.user_id=?
+                                                         GROUP BY i.id, i.total_amount
+                                                     ) x
+                                                     WHERE x.outstanding > 0`,
+                totalPayables: `SELECT COALESCE(SUM(x.outstanding),0) AS val
+                                                FROM (
+                                                    SELECT (pu.amount - COALESCE(SUM(CASE WHEN p.type='outgoing' AND p.status='posted' THEN pa.allocated_amount ELSE 0 END),0)) AS outstanding
+                                                    FROM purchases pu
+                                                    LEFT JOIN payment_allocations pa ON pa.purchase_id=pu.id
+                                                    LEFT JOIN payments p ON p.id=pa.payment_id
+                                                    WHERE pu.user_id=? AND COALESCE(pu.status,'posted')!='void'
+                                                    GROUP BY pu.id, pu.amount
+                                                ) x
+                                                WHERE x.outstanding > 0`,
+                overdueRec: `SELECT COUNT(*) AS val
+                                         FROM (
+                                             SELECT i.id,
+                                                            (i.total_amount - COALESCE(SUM(CASE WHEN p.type='incoming' AND p.status='posted' THEN pa.allocated_amount ELSE 0 END),0)) AS outstanding,
+                                                            i.due_date
+                                             FROM invoices i
+                                             LEFT JOIN payment_allocations pa ON pa.invoice_id=i.id
+                                             LEFT JOIN payments p ON p.id=pa.payment_id
+                                             WHERE i.user_id=?
+                                             GROUP BY i.id, i.total_amount, i.due_date
+                                         ) r
+                                         WHERE r.outstanding > 0 AND r.due_date < CURDATE()`,
+                overduePay: `SELECT COUNT(*) AS val
+                                         FROM (
+                                             SELECT pu.id,
+                                                            (pu.amount - COALESCE(SUM(CASE WHEN p.type='outgoing' AND p.status='posted' THEN pa.allocated_amount ELSE 0 END),0)) AS outstanding,
+                                                            pu.purchase_date
+                                             FROM purchases pu
+                                             LEFT JOIN payment_allocations pa ON pa.purchase_id=pu.id
+                                             LEFT JOIN payments p ON p.id=pa.payment_id
+                                             WHERE pu.user_id=? AND COALESCE(pu.status,'posted')!='void'
+                                             GROUP BY pu.id, pu.amount, pu.purchase_date
+                                         ) p
+                                         WHERE p.outstanding > 0 AND p.purchase_date < CURDATE()`,
+                totalInventoryValue: `SELECT COALESCE(SUM(s.qty * s.wac),0) AS val
+                                                            FROM (
+                                                                SELECT
+                                                                    sm.item_id,
+                                                                    COALESCE(SUM(sm.quantity_delta),0) AS qty,
+                                                                    COALESCE(
+                                                                        CASE
+                                                                            WHEN SUM(CASE WHEN sm.quantity_delta > 0 THEN sm.quantity_delta ELSE 0 END) > 0
+                                                                            THEN SUM(CASE WHEN sm.quantity_delta > 0 THEN COALESCE(sm.total_cost, sm.unit_cost * sm.quantity_delta, 0) ELSE 0 END)
+                                                                                     / SUM(CASE WHEN sm.quantity_delta > 0 THEN sm.quantity_delta ELSE 0 END)
+                                                                            ELSE 0
+                                                                        END,
+                                                                        0
+                                                                    ) AS wac
+                                                                FROM stock_movements sm
+                                                                WHERE sm.company_id=?
+                                                                GROUP BY sm.item_id
+                                                            ) s`,
         invoiceCount: `SELECT COUNT(*) AS val FROM invoices WHERE user_id=?`,
         paidInvoices: `SELECT COUNT(*) AS val FROM invoices WHERE user_id=? AND status='paid'`,
     };
@@ -1696,6 +1803,106 @@ app.get("/api/reports", authenticate, (req, res) => {
 });
 
 // ===========================================================
+// ACCOUNTING REPORTS (JOURNAL-DRIVEN)
+// ===========================================================
+
+app.get("/api/reports/trial-balance", authenticate, async (req, res) => {
+    try {
+        const { start_date, end_date } = req.query;
+        const report = await accountingReportsService.trialBalance(req.user.id, start_date, end_date);
+        res.json(report);
+    } catch (err) {
+        res.status(500).json({ message: err.message });
+    }
+});
+
+app.get("/api/reports/profit-loss", authenticate, async (req, res) => {
+    try {
+        const { start_date, end_date } = req.query;
+        const report = await accountingReportsService.profitAndLoss(req.user.id, start_date, end_date);
+        res.json(report);
+    } catch (err) {
+        res.status(500).json({ message: err.message });
+    }
+});
+
+app.get("/api/reports/balance-sheet", authenticate, async (req, res) => {
+    try {
+        const { as_of_date } = req.query;
+        const report = await accountingReportsService.balanceSheet(req.user.id, as_of_date);
+        res.json(report);
+    } catch (err) {
+        res.status(500).json({ message: err.message });
+    }
+});
+
+app.get("/api/reports/ar-aging", authenticate, async (req, res) => {
+    try {
+        const { as_of_date } = req.query;
+        const report = await accountingReportsService.arAging(req.user.id, as_of_date);
+        res.json(report);
+    } catch (err) {
+        res.status(500).json({ message: err.message });
+    }
+});
+
+app.get("/api/reports/ap-aging", authenticate, async (req, res) => {
+    try {
+        const { as_of_date } = req.query;
+        const report = await accountingReportsService.apAging(req.user.id, as_of_date);
+        res.json(report);
+    } catch (err) {
+        res.status(500).json({ message: err.message });
+    }
+});
+
+app.get("/api/reports/customers/:customerId/statement", authenticate, async (req, res) => {
+    try {
+        const { start_date, end_date } = req.query;
+        const report = await accountingReportsService.customerStatement(req.user.id, req.params.customerId, start_date, end_date);
+        res.json(report);
+    } catch (err) {
+        res.status(500).json({ message: err.message });
+    }
+});
+
+app.get("/api/reports/vendors/:vendorId/statement", authenticate, async (req, res) => {
+    try {
+        const { start_date, end_date } = req.query;
+        const report = await accountingReportsService.vendorStatement(req.user.id, req.params.vendorId, start_date, end_date);
+        res.json(report);
+    } catch (err) {
+        res.status(500).json({ message: err.message });
+    }
+});
+
+app.get("/api/reports/stock-summary", authenticate, async (req, res) => {
+    try {
+        const { as_of_date } = req.query;
+        const report = await accountingReportsService.stockSummary(req.user.id, as_of_date);
+        res.json(report);
+    } catch (err) {
+        res.status(500).json({ message: err.message });
+    }
+});
+
+app.get("/api/reports/stock-ledger/:itemId", authenticate, async (req, res) => {
+    try {
+        const { warehouse_id, start_date, end_date } = req.query;
+        const report = await accountingReportsService.stockLedger(
+            req.user.id,
+            req.params.itemId,
+            warehouse_id || null,
+            start_date || null,
+            end_date || null
+        );
+        res.json(report);
+    } catch (err) {
+        res.status(500).json({ message: err.message });
+    }
+});
+
+// ===========================================================
 // DASHBOARD STATS
 // ===========================================================
 
@@ -1704,10 +1911,54 @@ app.get("/api/dashboard/stats", authenticate, (req, res) => {
 
     const queries = {
         totalSales: "SELECT COALESCE(SUM(amount),0) AS val FROM sales WHERE user_id=?",
-        pendingReceivables: "SELECT COALESCE(SUM(amount),0) AS val FROM receivables WHERE user_id=? AND status='pending'",
-        pendingReceivablesCount: "SELECT COUNT(*) AS val FROM receivables WHERE user_id=? AND status='pending'",
-        outstandingPayables: "SELECT COALESCE(SUM(amount),0) AS val FROM payables WHERE user_id=? AND status!='paid'",
-        inventoryValue: "SELECT COALESCE(SUM(purchase_price * stock_quantity),0) AS val FROM inventory WHERE user_id=?",
+                pendingReceivables: `SELECT COALESCE(SUM(x.outstanding),0) AS val
+                                                         FROM (
+                                                             SELECT (i.total_amount - COALESCE(SUM(CASE WHEN p.type='incoming' AND p.status='posted' THEN pa.allocated_amount ELSE 0 END),0)) AS outstanding
+                                                             FROM invoices i
+                                                             LEFT JOIN payment_allocations pa ON pa.invoice_id=i.id
+                                                             LEFT JOIN payments p ON p.id=pa.payment_id
+                                                             WHERE i.user_id=? AND i.status!='cancelled'
+                                                             GROUP BY i.id, i.total_amount
+                                                         ) x
+                                                         WHERE x.outstanding > 0`,
+                pendingReceivablesCount: `SELECT COUNT(*) AS val
+                                                                    FROM (
+                                                                        SELECT i.id,
+                                                                                     (i.total_amount - COALESCE(SUM(CASE WHEN p.type='incoming' AND p.status='posted' THEN pa.allocated_amount ELSE 0 END),0)) AS outstanding
+                                                                        FROM invoices i
+                                                                        LEFT JOIN payment_allocations pa ON pa.invoice_id=i.id
+                                                                        LEFT JOIN payments p ON p.id=pa.payment_id
+                                                                        WHERE i.user_id=? AND i.status!='cancelled'
+                                                                        GROUP BY i.id, i.total_amount
+                                                                    ) x
+                                                                    WHERE x.outstanding > 0`,
+                outstandingPayables: `SELECT COALESCE(SUM(x.outstanding),0) AS val
+                                                            FROM (
+                                                                SELECT (pu.amount - COALESCE(SUM(CASE WHEN p.type='outgoing' AND p.status='posted' THEN pa.allocated_amount ELSE 0 END),0)) AS outstanding
+                                                                FROM purchases pu
+                                                                LEFT JOIN payment_allocations pa ON pa.purchase_id=pu.id
+                                                                LEFT JOIN payments p ON p.id=pa.payment_id
+                                                                WHERE pu.user_id=? AND COALESCE(pu.status,'posted')!='void'
+                                                                GROUP BY pu.id, pu.amount
+                                                            ) x
+                                                            WHERE x.outstanding > 0`,
+                inventoryValue: `SELECT COALESCE(SUM(s.qty * s.wac),0) AS val
+                                                 FROM (
+                                                     SELECT sm.item_id,
+                                                                    COALESCE(SUM(sm.quantity_delta),0) AS qty,
+                                                                    COALESCE(
+                                                                        CASE
+                                                                            WHEN SUM(CASE WHEN sm.quantity_delta > 0 THEN sm.quantity_delta ELSE 0 END) > 0
+                                                                            THEN SUM(CASE WHEN sm.quantity_delta > 0 THEN COALESCE(sm.total_cost, sm.unit_cost * sm.quantity_delta, 0) ELSE 0 END)
+                                                                                     / SUM(CASE WHEN sm.quantity_delta > 0 THEN sm.quantity_delta ELSE 0 END)
+                                                                            ELSE 0
+                                                                        END,
+                                                                        0
+                                                                    ) AS wac
+                                                     FROM stock_movements sm
+                                                     WHERE sm.company_id=?
+                                                     GROUP BY sm.item_id
+                                                 ) s`,
         inventoryCount: "SELECT COUNT(*) AS val FROM inventory WHERE user_id=?",
     };
 
@@ -1821,9 +2072,9 @@ app.post("/api/clients", authenticate, (req, res) => {
         if (dupErr) return res.status(500).json({ message: dupErr.message });
         if (dupRows.length) return res.status(400).json({ message: "Client already linked" });
 
-        db.query("SELECT id, name, email, business_name FROM profiles WHERE id = ?", [linked_profile_id], (profileErr, profileRows) => {
+        db.query("SELECT id, name, email, business_name FROM profiles WHERE id = ? AND is_admin = 0", [linked_profile_id], (profileErr, profileRows) => {
             if (profileErr) return res.status(500).json({ message: profileErr.message });
-            if (!profileRows.length) return res.status(404).json({ message: "Registered account not found" });
+            if (!profileRows.length) return res.status(404).json({ message: "Registered business account not found" });
 
             const profile = profileRows[0];
             const clientName = profile.business_name || profile.name || profile.email;
@@ -1896,9 +2147,9 @@ app.post("/api/vendors", authenticate, (req, res) => {
         if (dupErr) return res.status(500).json({ message: dupErr.message });
         if (dupRows.length) return res.status(400).json({ message: "Vendor already linked" });
 
-        db.query("SELECT id, name, email, business_name FROM profiles WHERE id = ?", [linked_profile_id], (profileErr, profileRows) => {
+        db.query("SELECT id, name, email, business_name FROM profiles WHERE id = ? AND is_admin = 0", [linked_profile_id], (profileErr, profileRows) => {
             if (profileErr) return res.status(500).json({ message: profileErr.message });
-            if (!profileRows.length) return res.status(404).json({ message: "Registered account not found" });
+            if (!profileRows.length) return res.status(404).json({ message: "Registered business account not found" });
 
             const profile = profileRows[0];
             const vendorName = profile.business_name || profile.name || profile.email;
@@ -1971,7 +2222,7 @@ app.get("/api/kyc/documents", authenticate, (req, res) => {
         });
 });
 
-app.get("/api/kyc/admin/documents", authenticate, (req, res) => {
+app.get("/api/kyc/admin/documents", authenticateAdmin, (req, res) => {
     db.query(
         `SELECT kd.*, p.email, p.name, ks.status AS kyc_status
      FROM kyc_documents kd
@@ -1985,7 +2236,7 @@ app.get("/api/kyc/admin/documents", authenticate, (req, res) => {
     );
 });
 
-app.put("/api/kyc/admin/approve/:documentId", authenticate, (req, res) => {
+app.put("/api/kyc/admin/approve/:documentId", authenticateAdmin, (req, res) => {
     db.query("SELECT user_id FROM kyc_documents WHERE id = ?", [req.params.documentId], (err, rows) => {
         if (err || !rows.length) return res.status(404).json({ message: "Document not found" });
         db.query(
@@ -1999,7 +2250,7 @@ app.put("/api/kyc/admin/approve/:documentId", authenticate, (req, res) => {
     });
 });
 
-app.put("/api/kyc/admin/reject/:documentId", authenticate, (req, res) => {
+app.put("/api/kyc/admin/reject/:documentId", authenticateAdmin, (req, res) => {
     const { rejectionReason } = req.body;
     db.query("SELECT user_id FROM kyc_documents WHERE id = ?", [req.params.documentId], (err, rows) => {
         if (err || !rows.length) return res.status(404).json({ message: "Document not found" });
@@ -2021,24 +2272,67 @@ app.put("/api/kyc/admin/reject/:documentId", authenticate, (req, res) => {
 // Admin Login
 app.post("/api/admin/login", (req, res) => {
     const { email, password } = req.body;
+    const requestMeta = getRequestMeta(req);
     if (!email || !password)
         return res.status(400).json({ message: "Email and password are required" });
 
     const normalEmail = email.toLowerCase().trim();
     db.query("SELECT * FROM profiles WHERE email = ? AND is_admin = 1", [normalEmail], (err, rows) => {
         if (err) return res.status(500).json({ message: "Login error" });
-        if (!rows.length) return res.status(401).json({ message: "Invalid credentials or not an admin" });
+        if (!rows.length) {
+            auditService.logAction({
+                entityType: "auth_session",
+                actionType: "login",
+                reason: "Invalid admin credentials",
+                newValues: { email: normalEmail, outcome: "invalid_admin" },
+                ipAddress: requestMeta.ipAddress,
+                userAgent: requestMeta.userAgent,
+                route: requestMeta.route,
+                method: requestMeta.method,
+                statusCode: 401,
+            }).catch(() => { });
+            return res.status(401).json({ message: "Invalid credentials or not an admin" });
+        }
 
         const user = rows[0];
         bcrypt.compare(String(password).trim(), user.password_hash, (cmpErr, match) => {
-            if (cmpErr || !match)
+            if (cmpErr || !match) {
+                auditService.logAction({
+                    actorUserId: user.id,
+                    companyId: user.id,
+                    entityType: "auth_session",
+                    entityId: user.id,
+                    actionType: "login",
+                    reason: "Invalid admin credentials",
+                    newValues: { email: user.email, outcome: "invalid_password", is_admin: true },
+                    ipAddress: requestMeta.ipAddress,
+                    userAgent: requestMeta.userAgent,
+                    route: requestMeta.route,
+                    method: requestMeta.method,
+                    statusCode: 401,
+                }).catch(() => { });
                 return res.status(401).json({ message: "Invalid credentials" });
+            }
 
             const token = jwt.sign(
                 { id: user.id, email: user.email, is_admin: true },
                 JWT_SECRET,
                 { expiresIn: "8h" }
             );
+            auditService.logAction({
+                actorUserId: user.id,
+                companyId: user.id,
+                entityType: "auth_session",
+                entityId: user.id,
+                actionType: "login",
+                reason: "Admin login successful",
+                newValues: { email: user.email, outcome: "success", is_admin: true },
+                ipAddress: requestMeta.ipAddress,
+                userAgent: requestMeta.userAgent,
+                route: requestMeta.route,
+                method: requestMeta.method,
+                statusCode: 200,
+            }).catch(() => { });
             res.json({ message: "Admin login successful", token });
         });
     });
@@ -2123,6 +2417,18 @@ app.put("/api/admin/kyc/reject/:userId", authenticateAdmin, (req, res) => {
 const ADMIN_SEED_SECRET = process.env.ADMIN_SEED_SECRET || "finflow_seed";
 
 app.post("/api/admin/seed", (req, res) => {
+    auditService.logAction({
+        entityType: "admin_seed",
+        actionType: "create",
+        reason: "Attempted use of disabled admin seed endpoint",
+        newValues: { email: req.body?.email || null },
+        ipAddress: getRequestMeta(req).ipAddress,
+        userAgent: getRequestMeta(req).userAgent,
+        route: getRequestMeta(req).route,
+        method: getRequestMeta(req).method,
+    }).catch(() => { });
+    return res.status(410).json({ message: "Admin seed endpoint disabled in production-hardening mode" });
+
     const { secret, email, password, name } = req.body;
 
     if (secret !== ADMIN_SEED_SECRET)
@@ -2190,7 +2496,6 @@ app.use((err, req, res, _next) => {
 app.listen(PORT, () => {
     console.log(`? FinFlow backend running on http://localhost:${PORT}`);
     console.log(`   Health: http://localhost:${PORT}/api/health`);
-    console.log(`   Debug:  http://localhost:${PORT}/api/debug/users`);
     const emailStatus = getEmailConfigStatus();
     console.log(`   Email verification: ${emailStatus.configured ? "configured" : "not configured"} (${emailStatus.provider})`);
 });
