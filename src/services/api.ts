@@ -1,5 +1,5 @@
 // API service for communicating with the backend
-const API_URL = "http://localhost:5000/api";
+const API_URL = "http://localhost:5001/api";
 
 // Get token from localStorage
 const getToken = () => localStorage.getItem("auth_token");
@@ -56,6 +56,10 @@ export const inventoryApi = {
     return apiRequest("/inventory");
   },
 
+  getVendorProducts: async (linkedProfileId: string) => {
+    return apiRequest(`/vendors/${linkedProfileId}/products`);
+  },
+
   add: async (product: any) => {
     return apiRequest("/inventory", {
       method: "POST",
@@ -72,6 +76,32 @@ export const inventoryApi = {
 
   delete: async (id: number) => {
     return apiRequest(`/inventory/${id}`, {
+      method: "DELETE",
+    });
+  },
+};
+
+export const vendorProductsApi = {
+  getMine: async () => {
+    return apiRequest("/vendor-products/mine");
+  },
+
+  add: async (product: any) => {
+    return apiRequest("/vendor-products", {
+      method: "POST",
+      body: JSON.stringify(product),
+    });
+  },
+
+  update: async (id: string, product: any) => {
+    return apiRequest(`/vendor-products/${id}`, {
+      method: "PUT",
+      body: JSON.stringify(product),
+    });
+  },
+
+  delete: async (id: string) => {
+    return apiRequest(`/vendor-products/${id}`, {
       method: "DELETE",
     });
   },
@@ -217,6 +247,10 @@ export const dashboardApi = {
 // ============= CLIENTS API =============
 
 export const clientsApi = {
+  getRegisteredAccounts: async () => {
+    return apiRequest("/accounts/registered");
+  },
+
   getSalesClients: async () => {
     return apiRequest("/clients/sales");
   },

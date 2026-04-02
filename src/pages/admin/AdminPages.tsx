@@ -11,7 +11,7 @@ import { Shield, LogOut, Eye, CheckCircle, XCircle, Download, FileText, Image } 
 import { toast } from "sonner";
 import { format } from "date-fns";
 
-const API_BASE = "http://localhost:5000";
+const API_BASE = "http://localhost:5001";
 
 interface KYCUser {
   id: string;

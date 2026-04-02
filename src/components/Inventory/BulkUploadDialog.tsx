@@ -8,7 +8,7 @@ import { Upload, Download, AlertCircle, CheckCircle, X } from "lucide-react";
 import { toast } from "sonner";
 import { useAuth } from "@/contexts/AuthContext";
 
-const API_BASE = "http://localhost:5000";
+const API_BASE = "http://localhost:5001";
 
 interface ProductRow {
   product_name: string;

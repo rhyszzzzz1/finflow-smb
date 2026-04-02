@@ -1,7 +1,8 @@
 // Nepali localization utilities
 
 export const formatCurrency = (amount: number): string => {
-  return `Rs. ${amount.toLocaleString('ne-NP', {
+  const value = Number.isFinite(amount) ? amount : 0;
+  return `Rs. ${value.toLocaleString('en-NP', {
     minimumFractionDigits: 2,
     maximumFractionDigits: 2,
   })}`;

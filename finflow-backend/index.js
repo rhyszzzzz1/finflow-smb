@@ -11,12 +11,22 @@ const dotenv = require("dotenv");
 const multer = require("multer");
 const path = require("path");
 const fs = require("fs");
+const crypto = require("crypto");
+const nodemailer = require("nodemailer");
 
 dotenv.config({ path: path.join(__dirname, "../.env") });
 
 const app = express();
 const PORT = process.env.PORT || 5000;
 const JWT_SECRET = process.env.JWT_SECRET || "finflow_jwt_secret_key_2024";
+const OTP_EXPIRY_MINUTES = parseInt(process.env.SIGNUP_OTP_EXPIRY_MINUTES || "10", 10);
+const EMAIL_PROVIDER = process.env.EMAIL_PROVIDER || "gmail";
+const SMTP_HOST = process.env.SMTP_HOST || (EMAIL_PROVIDER === "gmail" ? "smtp.gmail.com" : "");
+const SMTP_PORT = parseInt(process.env.SMTP_PORT || (EMAIL_PROVIDER === "gmail" ? "587" : "587"), 10);
+const SMTP_SECURE = String(process.env.SMTP_SECURE || "false").toLowerCase() === "true";
+const SMTP_USER = process.env.SMTP_USER || process.env.GMAIL_USER || "";
+const SMTP_PASS = process.env.SMTP_PASS || process.env.GMAIL_APP_PASSWORD || "";
+const SMTP_FROM = process.env.SMTP_FROM || SMTP_USER || "";
 
 // ── Middleware ─────────────────────────────────────────────
 app.use(cors({ origin: "*", credentials: true }));
@@ -47,7 +57,70 @@ const upload = multer({
 
 // ── UUID Helper ────────────────────────────────────────────
 function newId() {
-    return require("crypto").randomUUID();
+    return crypto.randomUUID();
+}
+
+function hashOtp(otp) {
+    return crypto.createHash("sha256").update(String(otp)).digest("hex");
+}
+
+function generateOtp() {
+    return String(Math.floor(100000 + Math.random() * 900000));
+}
+
+function isEmailDeliveryConfigured() {
+    return Boolean(SMTP_HOST && SMTP_PORT && SMTP_USER && SMTP_PASS && SMTP_FROM);
+}
+
+function getEmailConfigStatus() {
+    return {
+        configured: isEmailDeliveryConfigured(),
+        provider: EMAIL_PROVIDER,
+        host: SMTP_HOST || null,
+        port: SMTP_PORT || null,
+        secure: SMTP_SECURE,
+        from: SMTP_FROM || null,
+        missing: [
+            !SMTP_HOST ? "SMTP_HOST" : null,
+            !SMTP_USER ? (process.env.GMAIL_USER ? "GMAIL_APP_PASSWORD" : "SMTP_USER") : null,
+            !SMTP_PASS ? (process.env.GMAIL_USER ? "GMAIL_APP_PASSWORD" : "SMTP_PASS") : null,
+            !SMTP_FROM ? "SMTP_FROM" : null,
+        ].filter(Boolean),
+    };
+}
+
+function createMailer() {
+    if (!isEmailDeliveryConfigured()) {
+        throw new Error("Email delivery is not configured. Configure Gmail with GMAIL_USER and GMAIL_APP_PASSWORD, or set SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS and SMTP_FROM.");
+    }
+
+    return nodemailer.createTransport({
+        host: SMTP_HOST,
+        port: SMTP_PORT,
+        secure: SMTP_SECURE,
+        auth: {
+            user: SMTP_USER,
+            pass: SMTP_PASS,
+        },
+    });
+}
+
+async function sendSignupOtpEmail(email, name, otp) {
+    const transporter = createMailer();
+
+    await transporter.sendMail({
+        from: SMTP_FROM,
+        to: email,
+        subject: "Your FinFlow signup verification code",
+        text: [
+            `Hello ${name || "there"},`,
+            "",
+            `Your FinFlow verification code is: ${otp}`,
+            `This code will expire in ${OTP_EXPIRY_MINUTES} minutes.`,
+            "",
+            "If you did not request this, you can ignore this email.",
+        ].join("\n"),
+    });
 }
 
 // ── MySQL Connection ───────────────────────────────────────
@@ -142,6 +215,9 @@ function initDB() {
     CREATE TABLE IF NOT EXISTS inventory (
       id             VARCHAR(36)    PRIMARY KEY,
       user_id        VARCHAR(36)    NOT NULL,
+      linked_vendor_profile_id VARCHAR(36),
+      vendor_product_id VARCHAR(36),
+      linked_purchase_id VARCHAR(36),
       product_name   VARCHAR(255)   NOT NULL,
       sku            VARCHAR(100)   NOT NULL,
       category       VARCHAR(100),
@@ -161,6 +237,7 @@ function initDB() {
     CREATE TABLE IF NOT EXISTS clients (
       id          VARCHAR(36)  PRIMARY KEY,
       user_id     VARCHAR(36)  NOT NULL,
+      linked_profile_id VARCHAR(36),
       client_name VARCHAR(255) NOT NULL,
       email       VARCHAR(255),
       phone       VARCHAR(20),
@@ -173,6 +250,7 @@ function initDB() {
     CREATE TABLE IF NOT EXISTS vendors (
       id          VARCHAR(36)  PRIMARY KEY,
       user_id     VARCHAR(36)  NOT NULL,
+      linked_profile_id VARCHAR(36),
       vendor_name VARCHAR(255) NOT NULL,
       email       VARCHAR(255),
       phone       VARCHAR(20),
@@ -180,6 +258,21 @@ function initDB() {
       created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
       updated_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
       FOREIGN KEY (user_id) REFERENCES profiles(id) ON DELETE CASCADE
+    );
+
+    CREATE TABLE IF NOT EXISTS vendor_products (
+      id            VARCHAR(36)   PRIMARY KEY,
+      user_id       VARCHAR(36)   NOT NULL,
+      product_name  VARCHAR(255)  NOT NULL,
+      sku           VARCHAR(100)  NOT NULL,
+      category      VARCHAR(100),
+      description   TEXT,
+      selling_price DECIMAL(12,2) NOT NULL,
+      tax_rate      DECIMAL(5,2)  DEFAULT 18,
+      created_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      updated_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      FOREIGN KEY (user_id) REFERENCES profiles(id) ON DELETE CASCADE,
+      UNIQUE KEY unique_vendor_product_sku (user_id, sku)
     );
 
     CREATE TABLE IF NOT EXISTS invoices (
@@ -272,10 +365,28 @@ function initDB() {
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
       FOREIGN KEY (user_id) REFERENCES profiles(id) ON DELETE CASCADE
     );
+
+    CREATE TABLE IF NOT EXISTS pending_signups (
+      email          VARCHAR(255) PRIMARY KEY,
+      name           VARCHAR(100),
+      password_hash  VARCHAR(255) NOT NULL,
+      business_name  VARCHAR(255),
+      otp_hash       VARCHAR(255) NOT NULL,
+      otp_expires_at DATETIME NOT NULL,
+      created_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      updated_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+    );
   `;
     db.query(sql, (err) => {
-        if (err) console.error("❌ DB init error:", err.message);
-        else console.log("✅ Database tables ready");
+        if (err) console.error("? DB init error:", err.message);
+        else {
+            db.query("ALTER TABLE clients ADD COLUMN IF NOT EXISTS linked_profile_id VARCHAR(36) NULL", () => { });
+            db.query("ALTER TABLE vendors ADD COLUMN IF NOT EXISTS linked_profile_id VARCHAR(36) NULL", () => { });
+            db.query("ALTER TABLE inventory ADD COLUMN IF NOT EXISTS linked_vendor_profile_id VARCHAR(36) NULL", () => { });
+            db.query("ALTER TABLE inventory ADD COLUMN IF NOT EXISTS vendor_product_id VARCHAR(36) NULL", () => { });
+            db.query("ALTER TABLE inventory ADD COLUMN IF NOT EXISTS linked_purchase_id VARCHAR(36) NULL", () => { });
+            console.log("? Database tables ready");
+        }
     });
 }
 
@@ -288,6 +399,24 @@ app.get("/api/debug/users", (req, res) => {
         (err, rows) => {
             if (err) return res.status(500).json({ error: err.message });
             res.json({ count: rows.length, users: rows });
+        }
+    );
+});
+
+app.get("/api/system/email-status", (_req, res) => {
+    res.json(getEmailConfigStatus());
+});
+
+app.get("/api/accounts/registered", authenticate, (req, res) => {
+    db.query(
+        `SELECT id, name, email, business_name
+         FROM profiles
+         WHERE id <> ?
+         ORDER BY COALESCE(business_name, name, email) ASC`,
+        [req.user.id],
+        (err, rows) => {
+            if (err) return res.status(500).json({ message: err.message });
+            res.json(rows);
         }
     );
 });
@@ -320,35 +449,6 @@ app.delete("/api/data/clear-financials", authenticate, (req, res) => {
 
 // ── Register / Signup ──────────────────────────────────────
 // Seed 10 default clients + 10 vendors for a brand-new user
-function seedDefaultClientsVendors(userId) {
-    const clients = [
-        "Himalayan Traders", "Everest Stores", "Kathmandu Enterprises",
-        "Pokhara Retail Co.", "Lumbini Goods", "Chitwan Supplies",
-        "Biratnagar Commerce", "Janakpur Distributors", "Butwal Industries",
-        "Dharan Trading House"
-    ];
-    const vendors = [
-        "Nepal Wholesale Pvt. Ltd.", "Mountain Peak Suppliers",
-        "Summit Source Co.", "Valley Vendors Ltd.",
-        "Trishuli Trade House", "Bagmati Distributors",
-        "Koshi Supply Chain", "Gandaki Goods Depot",
-        "Mahakali Merchants", "Rapti Resource Pvt."
-    ];
-
-    clients.forEach(name => {
-        db.query(
-            "INSERT INTO clients (id, user_id, client_name) VALUES (?, ?, ?)",
-            [newId(), userId, name], () => { }
-        );
-    });
-    vendors.forEach(name => {
-        db.query(
-            "INSERT INTO vendors (id, user_id, vendor_name) VALUES (?, ?, ?)",
-            [newId(), userId, name], () => { }
-        );
-    });
-}
-
 function handleRegister(req, res) {
     const { name, email, password, businessName } = req.body;
     console.log(`[REGISTER] email=${email}`);
@@ -356,52 +456,131 @@ function handleRegister(req, res) {
     if (!email || !password)
         return res.status(400).json({ message: "Email and password are required" });
 
-    bcrypt.hash(String(password).trim(), 10, (hashErr, passwordHash) => {
-        if (hashErr) {
-            console.error("[REGISTER] bcrypt error:", hashErr.message);
-            return res.status(500).json({ message: "Registration failed" });
+    if (!isEmailDeliveryConfigured()) {
+        return res.status(500).json({
+            message: "Signup email verification is not configured on the server. Configure Gmail with GMAIL_USER and GMAIL_APP_PASSWORD, or set SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS and SMTP_FROM.",
+        });
+    }
+
+    const normalEmail = email.toLowerCase().trim();
+    const displayName = (name || normalEmail.split("@")[0]).trim();
+    const otp = generateOtp();
+    const otpHash = hashOtp(otp);
+    const expiresAt = new Date(Date.now() + OTP_EXPIRY_MINUTES * 60 * 1000);
+
+    db.query("SELECT id FROM profiles WHERE email = ?", [normalEmail], (checkErr, rows) => {
+        if (checkErr) {
+            console.error("[REGISTER] lookup error:", checkErr.message);
+            return res.status(500).json({ message: "Could not start signup verification" });
+        }
+
+        if (rows.length) {
+            return res.status(400).json({ message: "Email already registered" });
+        }
+
+        bcrypt.hash(String(password).trim(), 10, async (hashErr, passwordHash) => {
+            if (hashErr) {
+                console.error("[REGISTER] bcrypt error:", hashErr.message);
+                return res.status(500).json({ message: "Could not start signup verification" });
+            }
+
+            try {
+                await sendSignupOtpEmail(normalEmail, displayName, otp);
+            } catch (mailErr) {
+                console.error("[REGISTER] email error:", mailErr.message);
+                return res.status(500).json({ message: mailErr.message || "Failed to send verification email" });
+            }
+
+            db.query(
+                `INSERT INTO pending_signups (email, name, password_hash, business_name, otp_hash, otp_expires_at)
+                 VALUES (?, ?, ?, ?, ?, ?)
+                 ON DUPLICATE KEY UPDATE
+                   name = VALUES(name),
+                   password_hash = VALUES(password_hash),
+                   business_name = VALUES(business_name),
+                   otp_hash = VALUES(otp_hash),
+                   otp_expires_at = VALUES(otp_expires_at)`,
+                [normalEmail, displayName, passwordHash, businessName || null, otpHash, expiresAt],
+                (saveErr) => {
+                    if (saveErr) {
+                        console.error("[REGISTER] pending signup error:", saveErr.message);
+                        return res.status(500).json({ message: "Could not start signup verification" });
+                    }
+
+                    return res.status(200).json({
+                        message: "Verification code sent to your email address",
+                        requiresVerification: true,
+                        email: normalEmail,
+                    });
+                }
+            );
+        });
+    });
+}
+
+function handleVerifySignupOtp(req, res) {
+    const { email, otp } = req.body;
+
+    if (!email || !otp) {
+        return res.status(400).json({ message: "Email and OTP are required" });
+    }
+
+    const normalEmail = String(email).toLowerCase().trim();
+
+    db.query("SELECT * FROM pending_signups WHERE email = ?", [normalEmail], (pendingErr, rows) => {
+        if (pendingErr) {
+            console.error("[VERIFY-OTP] lookup error:", pendingErr.message);
+            return res.status(500).json({ message: "Verification failed" });
+        }
+
+        if (!rows.length) {
+            return res.status(400).json({ message: "No pending signup found for this email" });
+        }
+
+        const pendingSignup = rows[0];
+        const expiresAt = new Date(pendingSignup.otp_expires_at);
+
+        if (expiresAt.getTime() < Date.now()) {
+            return res.status(400).json({ message: "OTP has expired. Please request a new code." });
+        }
+
+        if (hashOtp(otp) !== pendingSignup.otp_hash) {
+            return res.status(400).json({ message: "Invalid OTP" });
         }
 
         const id = newId();
-        const displayName = (name || email.split("@")[0]).trim();
-        const normalEmail = email.toLowerCase().trim();
-        console.log(`[REGISTER] inserting user id=${id}`);
 
         db.query(
             "INSERT INTO profiles (id, name, email, password_hash, business_name) VALUES (?, ?, ?, ?, ?)",
-            [id, displayName, normalEmail, passwordHash, businessName || null],
-            (dbErr) => {
-                if (dbErr) {
-                    console.error("[REGISTER] insert error:", dbErr.message);
-                    if (dbErr.code === "ER_DUP_ENTRY")
+            [id, pendingSignup.name, normalEmail, pendingSignup.password_hash, pendingSignup.business_name || null],
+            (insertErr) => {
+                if (insertErr) {
+                    console.error("[VERIFY-OTP] create user error:", insertErr.message);
+                    if (insertErr.code === "ER_DUP_ENTRY") {
                         return res.status(400).json({ message: "Email already registered" });
-                    return res.status(500).json({ message: "Registration failed", error: dbErr.message });
+                    }
+                    return res.status(500).json({ message: "Could not create account" });
                 }
 
-                console.log(`[REGISTER] ✅ created ${email}`);
-
-                // Create default KYC record
                 db.query(
                     "INSERT IGNORE INTO kyc_status (id, user_id, submitted_at) VALUES (?, ?, NOW())",
                     [newId(), id],
                     () => { }
                 );
 
-                // Seed default clients & vendors
-                seedDefaultClientsVendors(id);
+                db.query("DELETE FROM pending_signups WHERE email = ?", [normalEmail], () => { });
 
                 const token = jwt.sign({ id, email: normalEmail }, JWT_SECRET, { expiresIn: "7d" });
-                res.status(201).json({
-                    message: "Registered successfully",
+                return res.status(201).json({
+                    message: "Account created successfully",
                     token,
-                    user: { id, name: displayName, email: normalEmail },
+                    user: { id, name: pendingSignup.name, email: normalEmail },
                 });
             }
         );
     });
 }
 
-// ── Login ──────────────────────────────────────────────────
 function handleLogin(req, res) {
     const { email, password } = req.body;
     console.log(`[LOGIN] attempt email=${email}`);
@@ -457,9 +636,134 @@ function handleLogin(req, res) {
 // Register both URL patterns (api.ts uses /api/login, AuthContext uses /api/auth/login)
 app.post("/api/register", handleRegister); // api.ts
 app.post("/api/auth/signup", handleRegister); // AuthContext
+app.post("/api/verify-signup-otp", handleVerifySignupOtp);
+app.post("/api/auth/verify-signup-otp", handleVerifySignupOtp);
 
 app.post("/api/login", handleLogin);    // api.ts
 app.post("/api/auth/login", handleLogin);    // AuthContext
+
+// ===========================================================
+// VENDOR PRODUCT CATALOG
+// ===========================================================
+
+app.get("/api/vendor-products/mine", authenticate, (req, res) => {
+    db.query(
+        "SELECT * FROM vendor_products WHERE user_id = ? ORDER BY product_name ASC",
+        [req.user.id],
+        (err, rows) => {
+            if (err) return res.status(500).json({ message: err.message });
+            res.json(rows);
+        }
+    );
+});
+
+app.post("/api/vendor-products", authenticate, (req, res) => {
+    const { product_name, sku, category, description, selling_price, tax_rate } = req.body;
+
+    if (!product_name || !sku || selling_price === undefined) {
+        return res.status(400).json({ message: "product_name, sku and selling_price are required" });
+    }
+
+    const id = newId();
+    db.query(
+        `INSERT INTO vendor_products
+         (id, user_id, product_name, sku, category, description, selling_price, tax_rate)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+            id,
+            req.user.id,
+            product_name,
+            sku,
+            category || null,
+            description || null,
+            parseFloat(selling_price),
+            tax_rate === undefined ? 18 : parseFloat(tax_rate),
+        ],
+        (err) => {
+            if (err) {
+                if (err.code === "ER_DUP_ENTRY") {
+                    return res.status(400).json({ message: "SKU already exists in your catalog" });
+                }
+                return res.status(500).json({ message: err.message });
+            }
+
+            db.query("SELECT * FROM vendor_products WHERE id = ?", [id], (_e, rows) => res.status(201).json(rows[0]));
+        }
+    );
+});
+
+app.put("/api/vendor-products/:id", authenticate, (req, res) => {
+    const { product_name, sku, category, description, selling_price, tax_rate } = req.body;
+
+    if (!product_name || !sku || selling_price === undefined) {
+        return res.status(400).json({ message: "product_name, sku and selling_price are required" });
+    }
+
+    db.query(
+        `UPDATE vendor_products
+         SET product_name=?, sku=?, category=?, description=?, selling_price=?, tax_rate=?, updated_at=NOW()
+         WHERE id=? AND user_id=?`,
+        [
+            product_name,
+            sku,
+            category || null,
+            description || null,
+            parseFloat(selling_price),
+            tax_rate === undefined ? 18 : parseFloat(tax_rate),
+            req.params.id,
+            req.user.id,
+        ],
+        (err, result) => {
+            if (err) {
+                if (err.code === "ER_DUP_ENTRY") {
+                    return res.status(400).json({ message: "SKU already exists in your catalog" });
+                }
+                return res.status(500).json({ message: err.message });
+            }
+            if (!result.affectedRows) return res.status(404).json({ message: "Catalog product not found" });
+            db.query("SELECT * FROM vendor_products WHERE id = ?", [req.params.id], (_e, rows) => res.json(rows[0]));
+        }
+    );
+});
+
+app.delete("/api/vendor-products/:id", authenticate, (req, res) => {
+    db.query(
+        "DELETE FROM vendor_products WHERE id=? AND user_id=?",
+        [req.params.id, req.user.id],
+        (err, result) => {
+            if (err) return res.status(500).json({ message: err.message });
+            if (!result.affectedRows) return res.status(404).json({ message: "Catalog product not found" });
+            res.json({ message: "Catalog product deleted" });
+        }
+    );
+});
+
+app.get("/api/vendors/:linkedProfileId/products", authenticate, (req, res) => {
+    const linkedProfileId = req.params.linkedProfileId;
+
+    db.query(
+        `SELECT vendor_name
+         FROM vendors
+         WHERE user_id = ? AND linked_profile_id = ?`,
+        [req.user.id, linkedProfileId],
+        (vendorErr, vendorRows) => {
+            if (vendorErr) return res.status(500).json({ message: vendorErr.message });
+            if (!vendorRows.length) return res.status(404).json({ message: "Vendor link not found" });
+
+            db.query(
+                `SELECT vp.*, ? AS vendor_name, ? AS linked_profile_id
+                 FROM vendor_products vp
+                 WHERE vp.user_id = ?
+                 ORDER BY vp.product_name ASC`,
+                [vendorRows[0].vendor_name, linkedProfileId, linkedProfileId],
+                (err, rows) => {
+                    if (err) return res.status(500).json({ message: err.message });
+                    res.json(rows);
+                }
+            );
+        }
+    );
+});
 
 // ===========================================================
 // INVENTORY
@@ -472,6 +776,217 @@ app.get("/api/inventory", authenticate, (req, res) => {
         (err, rows) => {
             if (err) return res.status(500).json({ message: err.message });
             res.json(rows);
+        }
+    );
+});
+
+app.post("/api/inventory", authenticate, (req, res) => {
+    const { linked_vendor_profile_id, vendor_product_id, stock_quantity, purchase_price, selling_price, payment_type } = req.body;
+
+    if (!linked_vendor_profile_id || !vendor_product_id || purchase_price === undefined || selling_price === undefined) {
+        return res.status(400).json({ message: "linked_vendor_profile_id, vendor_product_id, purchase_price and selling_price are required" });
+    }
+
+    db.query(
+        `SELECT vendor_name
+         FROM vendors
+         WHERE user_id = ? AND linked_profile_id = ?`,
+        [req.user.id, linked_vendor_profile_id],
+        (vendorErr, vendorRows) => {
+            if (vendorErr) return res.status(500).json({ message: vendorErr.message });
+            if (!vendorRows.length) return res.status(400).json({ message: "Select a linked vendor account first" });
+
+            db.query(
+                `SELECT *
+                 FROM vendor_products
+                 WHERE id = ? AND user_id = ?`,
+                [vendor_product_id, linked_vendor_profile_id],
+                (productErr, productRows) => {
+                    if (productErr) return res.status(500).json({ message: productErr.message });
+                    if (!productRows.length) return res.status(400).json({ message: "Selected product is not available from that vendor" });
+
+                    const vendorProduct = productRows[0];
+                    const invId = newId();
+                    const qty = parseInt(stock_quantity, 10) || 0;
+                    const pType = payment_type || "cash";
+                    const today = new Date().toISOString().slice(0, 10);
+                    const totalCost = parseFloat(purchase_price) * qty;
+                    const purchaseId = qty > 0 ? newId() : null;
+
+                    db.query(
+                        `INSERT INTO inventory
+                         (id, user_id, linked_vendor_profile_id, vendor_product_id, linked_purchase_id,
+                          product_name, sku, category, description, stock_quantity,
+                          purchase_price, selling_price, tax_rate, vendor_name, payment_type)
+                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                        [
+                            invId,
+                            req.user.id,
+                            linked_vendor_profile_id,
+                            vendor_product_id,
+                            purchaseId,
+                            vendorProduct.product_name,
+                            vendorProduct.sku,
+                            vendorProduct.category || null,
+                            vendorProduct.description || null,
+                            qty,
+                            parseFloat(purchase_price),
+                            parseFloat(selling_price),
+                            vendorProduct.tax_rate === undefined ? 18 : parseFloat(vendorProduct.tax_rate),
+                            vendorRows[0].vendor_name,
+                            pType,
+                        ],
+                        (err) => {
+                            if (err) {
+                                if (err.code === "ER_DUP_ENTRY") {
+                                    return res.status(400).json({ message: "This product is already in your inventory" });
+                                }
+                                return res.status(500).json({ message: err.message });
+                            }
+
+                            if (purchaseId) {
+                                const paidStatus = pType === "cash" ? "paid" : "pending";
+                                db.query(
+                                    `INSERT INTO purchases
+                                     (id, user_id, vendor_name, product_name, quantity, amount,
+                                      purchase_date, payment_type, payment_status)
+                                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                                    [
+                                        purchaseId,
+                                        req.user.id,
+                                        vendorRows[0].vendor_name,
+                                        vendorProduct.product_name,
+                                        qty,
+                                        totalCost,
+                                        today,
+                                        pType,
+                                        paidStatus,
+                                    ],
+                                    (pErr) => { if (pErr) console.error("[AUTO-PURCHASE]", pErr.message); }
+                                );
+
+                                if (pType === "credit" && totalCost > 0) {
+                                    const payableId = newId();
+                                    const dueDate = new Date();
+                                    dueDate.setDate(dueDate.getDate() + 30);
+                                    db.query(
+                                        `INSERT INTO payables
+                                         (id, user_id, vendor_name, invoice_id, amount, due_date, status)
+                                         VALUES (?, ?, ?, ?, ?, ?, 'pending')`,
+                                        [payableId, req.user.id, vendorRows[0].vendor_name, purchaseId, totalCost, dueDate.toISOString().slice(0, 10)],
+                                        (pyErr) => { if (pyErr) console.error("[AUTO-PAYABLE]", pyErr.message); }
+                                    );
+                                }
+                            }
+
+                            db.query("SELECT * FROM inventory WHERE id = ?", [invId], (_e, rows) => res.status(201).json(rows[0]));
+                        }
+                    );
+                }
+            );
+        }
+    );
+});
+
+app.put("/api/inventory/:id", authenticate, (req, res) => {
+    const { linked_vendor_profile_id, vendor_product_id, stock_quantity, purchase_price, selling_price, payment_type } = req.body;
+
+    if (!linked_vendor_profile_id || !vendor_product_id || purchase_price === undefined || selling_price === undefined) {
+        return res.status(400).json({ message: "linked_vendor_profile_id, vendor_product_id, purchase_price and selling_price are required" });
+    }
+
+    db.query(
+        `SELECT vendor_name
+         FROM vendors
+         WHERE user_id = ? AND linked_profile_id = ?`,
+        [req.user.id, linked_vendor_profile_id],
+        (vendorErr, vendorRows) => {
+            if (vendorErr) return res.status(500).json({ message: vendorErr.message });
+            if (!vendorRows.length) return res.status(400).json({ message: "Select a linked vendor account first" });
+
+            db.query(
+                `SELECT *
+                 FROM vendor_products
+                 WHERE id = ? AND user_id = ?`,
+                [vendor_product_id, linked_vendor_profile_id],
+                (productErr, productRows) => {
+                    if (productErr) return res.status(500).json({ message: productErr.message });
+                    if (!productRows.length) return res.status(400).json({ message: "Selected product is not available from that vendor" });
+
+                    const vendorProduct = productRows[0];
+
+                    db.query(
+                        `UPDATE inventory
+                         SET linked_vendor_profile_id=?, vendor_product_id=?, product_name=?, sku=?, category=?, description=?,
+                             stock_quantity=?, purchase_price=?, selling_price=?, tax_rate=?, vendor_name=?, payment_type=?, updated_at=NOW()
+                         WHERE id=? AND user_id=?`,
+                        [
+                            linked_vendor_profile_id,
+                            vendor_product_id,
+                            vendorProduct.product_name,
+                            vendorProduct.sku,
+                            vendorProduct.category || null,
+                            vendorProduct.description || null,
+                            parseInt(stock_quantity, 10) || 0,
+                            parseFloat(purchase_price),
+                            parseFloat(selling_price),
+                            vendorProduct.tax_rate === undefined ? 18 : parseFloat(vendorProduct.tax_rate),
+                            vendorRows[0].vendor_name,
+                            payment_type || "cash",
+                            req.params.id,
+                            req.user.id,
+                        ],
+                        (err, result) => {
+                            if (err) {
+                                if (err.code === "ER_DUP_ENTRY") {
+                                    return res.status(400).json({ message: "This product is already in your inventory" });
+                                }
+                                return res.status(500).json({ message: err.message });
+                            }
+                            if (!result.affectedRows) return res.status(404).json({ message: "Item not found" });
+                            db.query("SELECT * FROM inventory WHERE id = ?", [req.params.id], (_e, rows) => res.json(rows[0]));
+                        }
+                    );
+                }
+            );
+        }
+    );
+});
+
+app.delete("/api/inventory/:id", authenticate, (req, res) => {
+    db.query(
+        "SELECT * FROM inventory WHERE id=? AND user_id=?",
+        [req.params.id, req.user.id],
+        (fErr, fRows) => {
+            if (fErr) return res.status(500).json({ message: fErr.message });
+            if (!fRows.length) return res.status(404).json({ message: "Item not found" });
+
+            const item = fRows[0];
+
+            db.query(
+                "DELETE FROM inventory WHERE id=? AND user_id=?",
+                [req.params.id, req.user.id],
+                (err, result) => {
+                    if (err) return res.status(500).json({ message: err.message });
+                    if (!result.affectedRows) return res.status(404).json({ message: "Item not found" });
+
+                    if (item.linked_purchase_id) {
+                        db.query(
+                            "DELETE FROM payables WHERE user_id=? AND invoice_id=?",
+                            [req.user.id, item.linked_purchase_id],
+                            (pyErr) => { if (pyErr) console.error("[AUTO-DEL-PAYABLE-INV]", pyErr.message); }
+                        );
+
+                        db.query(
+                            "DELETE FROM purchases WHERE user_id=? AND id=?",
+                            [req.user.id, item.linked_purchase_id],
+                            (pErr) => { if (pErr) console.error("[AUTO-DEL-PURCHASE]", pErr.message); }
+                        );
+                    }
+
+                    res.json({ message: "Deleted successfully" });
+                }
+            );
         }
     );
 });
@@ -1266,7 +1781,7 @@ app.post("/api/settings", authenticate, (req, res) => {
 
 // Plain list for dropdowns
 app.get("/api/clients/list", authenticate, (req, res) => {
-    db.query("SELECT id, client_name FROM clients WHERE user_id=? ORDER BY client_name ASC",
+    db.query("SELECT id, linked_profile_id, client_name FROM clients WHERE user_id=? ORDER BY client_name ASC",
         [req.user.id], (err, rows) => {
             if (err) return res.status(500).json({ message: err.message });
             res.json(rows);
@@ -1278,6 +1793,7 @@ app.get("/api/clients/sales", authenticate, (req, res) => {
     db.query(
         `SELECT
            c.id,
+           c.linked_profile_id,
            c.client_name,
            c.email,
            c.phone,
@@ -1287,7 +1803,7 @@ app.get("/api/clients/sales", authenticate, (req, res) => {
          FROM clients c
          LEFT JOIN invoices i ON i.client_name = c.client_name AND i.user_id = c.user_id
          WHERE c.user_id = ?
-         GROUP BY c.id, c.client_name, c.email, c.phone
+         GROUP BY c.id, c.linked_profile_id, c.client_name, c.email, c.phone
          ORDER BY c.client_name ASC`,
         [req.user.id], (err, rows) => {
             if (err) return res.status(500).json({ message: err.message });
@@ -1297,22 +1813,32 @@ app.get("/api/clients/sales", authenticate, (req, res) => {
 });
 
 app.post("/api/clients", authenticate, (req, res) => {
-    const { client_name, email, phone, address } = req.body;
-    if (!client_name) return res.status(400).json({ message: "client_name is required" });
+    const { linked_profile_id } = req.body;
+    if (!linked_profile_id) return res.status(400).json({ message: "linked_profile_id is required" });
+    if (linked_profile_id === req.user.id) return res.status(400).json({ message: "You cannot add your own account as a client" });
 
-    const id = newId();
-    db.query(
-        "INSERT INTO clients (id, user_id, client_name, email, phone, address) VALUES (?, ?, ?, ?, ?, ?)",
-        [id, req.user.id, client_name, email || null, phone || null, address || null],
-        (err) => {
-            if (err) {
-                if (err.code === "ER_DUP_ENTRY")
-                    return res.status(400).json({ message: "Client already exists" });
-                return res.status(500).json({ message: err.message });
-            }
-            db.query("SELECT * FROM clients WHERE id = ?", [id], (e, rows) => res.status(201).json(rows[0]));
-        }
-    );
+    db.query("SELECT id FROM clients WHERE user_id = ? AND linked_profile_id = ?", [req.user.id, linked_profile_id], (dupErr, dupRows) => {
+        if (dupErr) return res.status(500).json({ message: dupErr.message });
+        if (dupRows.length) return res.status(400).json({ message: "Client already linked" });
+
+        db.query("SELECT id, name, email, business_name FROM profiles WHERE id = ?", [linked_profile_id], (profileErr, profileRows) => {
+            if (profileErr) return res.status(500).json({ message: profileErr.message });
+            if (!profileRows.length) return res.status(404).json({ message: "Registered account not found" });
+
+            const profile = profileRows[0];
+            const clientName = profile.business_name || profile.name || profile.email;
+            const id = newId();
+
+            db.query(
+                "INSERT INTO clients (id, user_id, linked_profile_id, client_name, email) VALUES (?, ?, ?, ?, ?)",
+                [id, req.user.id, linked_profile_id, clientName, profile.email || null],
+                (err) => {
+                    if (err) return res.status(500).json({ message: err.message });
+                    db.query("SELECT * FROM clients WHERE id = ?", [id], (_e, rows) => res.status(201).json(rows[0]));
+                }
+            );
+        });
+    });
 });
 
 app.delete("/api/clients/:id", authenticate, (req, res) => {
@@ -1330,7 +1856,7 @@ app.delete("/api/clients/:id", authenticate, (req, res) => {
 
 // Plain list for dropdowns
 app.get("/api/vendors/list", authenticate, (req, res) => {
-    db.query("SELECT id, vendor_name FROM vendors WHERE user_id=? ORDER BY vendor_name ASC",
+    db.query("SELECT id, linked_profile_id, vendor_name FROM vendors WHERE user_id=? ORDER BY vendor_name ASC",
         [req.user.id], (err, rows) => {
             if (err) return res.status(500).json({ message: err.message });
             res.json(rows);
@@ -1342,6 +1868,7 @@ app.get("/api/clients/vendors", authenticate, (req, res) => {
     db.query(
         `SELECT
            v.id,
+           v.linked_profile_id,
            v.vendor_name,
            v.email,
            v.phone,
@@ -1351,7 +1878,7 @@ app.get("/api/clients/vendors", authenticate, (req, res) => {
          FROM vendors v
          LEFT JOIN payables p ON p.vendor_name = v.vendor_name AND p.user_id = v.user_id
          WHERE v.user_id = ?
-         GROUP BY v.id, v.vendor_name, v.email, v.phone
+         GROUP BY v.id, v.linked_profile_id, v.vendor_name, v.email, v.phone
          ORDER BY v.vendor_name ASC`,
         [req.user.id], (err, rows) => {
             if (err) return res.status(500).json({ message: err.message });
@@ -1361,22 +1888,32 @@ app.get("/api/clients/vendors", authenticate, (req, res) => {
 });
 
 app.post("/api/vendors", authenticate, (req, res) => {
-    const { vendor_name, email, phone, address } = req.body;
-    if (!vendor_name) return res.status(400).json({ message: "vendor_name is required" });
+    const { linked_profile_id } = req.body;
+    if (!linked_profile_id) return res.status(400).json({ message: "linked_profile_id is required" });
+    if (linked_profile_id === req.user.id) return res.status(400).json({ message: "You cannot add your own account as a vendor" });
 
-    const id = newId();
-    db.query(
-        "INSERT INTO vendors (id, user_id, vendor_name, email, phone, address) VALUES (?, ?, ?, ?, ?, ?)",
-        [id, req.user.id, vendor_name, email || null, phone || null, address || null],
-        (err) => {
-            if (err) {
-                if (err.code === "ER_DUP_ENTRY")
-                    return res.status(400).json({ message: "Vendor already exists" });
-                return res.status(500).json({ message: err.message });
-            }
-            db.query("SELECT * FROM vendors WHERE id = ?", [id], (e, rows) => res.status(201).json(rows[0]));
-        }
-    );
+    db.query("SELECT id FROM vendors WHERE user_id = ? AND linked_profile_id = ?", [req.user.id, linked_profile_id], (dupErr, dupRows) => {
+        if (dupErr) return res.status(500).json({ message: dupErr.message });
+        if (dupRows.length) return res.status(400).json({ message: "Vendor already linked" });
+
+        db.query("SELECT id, name, email, business_name FROM profiles WHERE id = ?", [linked_profile_id], (profileErr, profileRows) => {
+            if (profileErr) return res.status(500).json({ message: profileErr.message });
+            if (!profileRows.length) return res.status(404).json({ message: "Registered account not found" });
+
+            const profile = profileRows[0];
+            const vendorName = profile.business_name || profile.name || profile.email;
+            const id = newId();
+
+            db.query(
+                "INSERT INTO vendors (id, user_id, linked_profile_id, vendor_name, email) VALUES (?, ?, ?, ?, ?)",
+                [id, req.user.id, linked_profile_id, vendorName, profile.email || null],
+                (err) => {
+                    if (err) return res.status(500).json({ message: err.message });
+                    db.query("SELECT * FROM vendors WHERE id = ?", [id], (_e, rows) => res.status(201).json(rows[0]));
+                }
+            );
+        });
+    });
 });
 
 app.delete("/api/vendors/:id", authenticate, (req, res) => {
@@ -1651,7 +2188,9 @@ app.use((err, req, res, _next) => {
 // START
 // ===========================================================
 app.listen(PORT, () => {
-    console.log(`✅ FinFlow backend running on http://localhost:${PORT}`);
+    console.log(`? FinFlow backend running on http://localhost:${PORT}`);
     console.log(`   Health: http://localhost:${PORT}/api/health`);
     console.log(`   Debug:  http://localhost:${PORT}/api/debug/users`);
+    const emailStatus = getEmailConfigStatus();
+    console.log(`   Email verification: ${emailStatus.configured ? "configured" : "not configured"} (${emailStatus.provider})`);
 });

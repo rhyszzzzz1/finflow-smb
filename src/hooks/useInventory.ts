@@ -4,6 +4,9 @@ import { toast } from "sonner";
 
 export interface InventoryItem {
   id: string;
+  linked_vendor_profile_id: string | null;
+  vendor_product_id: string | null;
+  linked_purchase_id: string | null;
   product_name: string;
   sku: string;
   stock_quantity: number;
@@ -24,7 +27,14 @@ export const useInventory = () => {
   const fetchInventory = async () => {
     try {
       const data = await inventoryApi.getAll();
-      setInventory(Array.isArray(data) ? data : data.data || []);
+      const rows = Array.isArray(data) ? data : data.data || [];
+      setInventory(rows.map((item: any) => ({
+        ...item,
+        stock_quantity: Number(item.stock_quantity) || 0,
+        purchase_price: Number(item.purchase_price) || 0,
+        selling_price: Number(item.selling_price) || 0,
+        tax_rate: Number(item.tax_rate) || 0,
+      })));
     } catch (error: any) {
       toast.error("Failed to load inventory");
       console.error(error);
