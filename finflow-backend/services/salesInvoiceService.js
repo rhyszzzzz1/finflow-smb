@@ -346,54 +346,6 @@ class SalesInvoiceService {
     };
   }
 
-  async syncLegacyInvoice(conn, actorUserId, header, lines) {
-    const items = (lines || []).map((line) => ({
-      item_id: line.item_id || null,
-      description: line.description,
-      quantity: line.quantity,
-      unit_price: line.unit_price,
-      discount_type: line.discount_type,
-      discount_value: line.discount_value,
-      discount_amount: line.discount_amount,
-      tax_code_id: line.tax_code_id || null,
-      tax_rate: line.tax_rate,
-      line_subtotal: line.line_subtotal,
-      line_tax_amount: line.line_tax_amount,
-      line_total: line.line_total,
-    }));
-
-    await conn.execute(
-      `INSERT INTO invoices
-        (id, user_id, invoice_no, client_name, total_amount, status, invoice_date, due_date, items, discount, tax_rate, tax_amount)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-       ON DUPLICATE KEY UPDATE
-         invoice_no = VALUES(invoice_no),
-         client_name = VALUES(client_name),
-         total_amount = VALUES(total_amount),
-         status = VALUES(status),
-         invoice_date = VALUES(invoice_date),
-         due_date = VALUES(due_date),
-         items = VALUES(items),
-         discount = VALUES(discount),
-         tax_rate = VALUES(tax_rate),
-         tax_amount = VALUES(tax_amount)`,
-      [
-        header.id,
-        actorUserId,
-        header.invoice_no,
-        header.customer_name,
-        header.total_amount,
-        header.status,
-        header.invoice_date,
-        header.due_date,
-        JSON.stringify(items),
-        header.discount_amount || 0,
-        header.taxable_amount > 0 ? this.money((header.tax_amount / header.taxable_amount) * 100) : 0,
-        header.tax_amount || 0,
-      ]
-    );
-  }
-
   async getPaymentSnapshot(conn, actorUserId, invoiceId, totalAmount) {
     const row = await this.queryOne(
       conn,
@@ -496,7 +448,6 @@ class SalesInvoiceService {
         [invoiceId]
       );
 
-      await this.syncLegacyInvoice(conn, actorUserId, header, lines);
       const hydrated = await this.hydrateInvoice(conn, actorUserId, header);
       await this.writeAudit(conn, {
         actorUserId,
@@ -578,7 +529,6 @@ class SalesInvoiceService {
       );
 
       const header = await this.queryOne(conn, `SELECT * FROM sales_invoice_headers WHERE id = ?`, [invoiceId]);
-      await this.syncLegacyInvoice(conn, actorUserId, header, lines);
       const hydrated = await this.hydrateInvoice(conn, actorUserId, header);
       await this.writeAudit(conn, {
         actorUserId,
@@ -623,7 +573,6 @@ class SalesInvoiceService {
       );
       const updated = await this.queryOne(conn, `SELECT * FROM sales_invoice_headers WHERE id = ?`, [invoiceId]);
       const lines = await this.queryAll(conn, `SELECT * FROM sales_invoice_lines WHERE sales_invoice_id = ? ORDER BY line_no ASC`, [invoiceId]);
-      await this.syncLegacyInvoice(conn, actorUserId, updated, lines);
       const hydrated = await this.hydrateInvoice(conn, actorUserId, updated);
       await this.writeAudit(conn, {
         actorUserId,
@@ -758,7 +707,6 @@ class SalesInvoiceService {
       });
 
       const updated = await this.queryOne(conn, `SELECT * FROM sales_invoice_headers WHERE id = ?`, [invoiceId]);
-      await this.syncLegacyInvoice(conn, actorUserId, updated, lines);
       const hydrated = await this.hydrateInvoice(conn, actorUserId, updated);
       await this.writeAudit(conn, {
         actorUserId,
@@ -810,7 +758,6 @@ class SalesInvoiceService {
 
       const updated = await this.queryOne(conn, `SELECT * FROM sales_invoice_headers WHERE id = ?`, [invoiceId]);
       const lines = await this.queryAll(conn, `SELECT * FROM sales_invoice_lines WHERE sales_invoice_id = ? ORDER BY line_no ASC`, [invoiceId]);
-      await this.syncLegacyInvoice(conn, actorUserId, updated, lines);
       const hydrated = await this.hydrateInvoice(conn, actorUserId, updated);
       await this.writeAudit(conn, {
         actorUserId,

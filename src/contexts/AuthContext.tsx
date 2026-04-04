@@ -29,7 +29,7 @@ const postJson = async (endpoint: string, payload: unknown) => {
     body: JSON.stringify(payload),
   });
 
-  const data = await response.json();
+  const data = await response.json().catch(() => ({}));
   return { response, data };
 };
 

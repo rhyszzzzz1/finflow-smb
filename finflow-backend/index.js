@@ -38,6 +38,7 @@ const { createSalesInvoiceRoutes } = require("./routes/salesInvoiceRoutes");
 const { createPurchaseBillRoutes } = require("./routes/purchaseBillRoutes");
 const { createInventoryRoutes } = require("./routes/inventoryRoutes");
 const { createAuditRequestMiddleware } = require("./middleware/auditRequestMiddleware");
+const { instrumentLegacyWriteGuards } = require("./utils/legacyWriteGuard");
 
 dotenv.config({ path: path.join(__dirname, "../.env") });
 
@@ -132,6 +133,42 @@ function getRequestMeta(req) {
     };
 }
 
+function logLegacyEndpointUsage(req, mode, replacement = null) {
+    const meta = getRequestMeta(req);
+    const warning = `Legacy endpoint used — migrate frontend [${mode}] ${meta.method} ${meta.route}`;
+    console.warn(`[LEGACY_ENDPOINT] ${warning}`);
+
+    if (typeof auditService === "undefined" || !auditService) {
+        return;
+    }
+
+    auditService.logAction({
+        actorUserId: req.user?.id || extractUserIdFromToken(req),
+        companyId: req.user?.id || null,
+        entityType: "legacy_endpoint",
+        entityId: meta.route,
+        actionType: mode === "read" ? "compat_read" : "deprecated_write_attempt",
+        reason: "Legacy endpoint used — migrate frontend",
+        newValues: {
+            replacement,
+            method: meta.method,
+            route: meta.route,
+        },
+        ipAddress: meta.ipAddress,
+        userAgent: meta.userAgent,
+        route: meta.route,
+        method: meta.method,
+    }).catch(() => { });
+}
+
+function respondLegacyWriteDeprecated(req, res, replacement) {
+    logLegacyEndpointUsage(req, "write", replacement);
+    return res.status(410).json({
+        message: "This endpoint is deprecated. Use accounting APIs instead.",
+        replacement,
+    });
+}
+
 function extractUserIdFromToken(req) {
     const auth = req.headers["authorization"];
     const token = auth && auth.split(" ")[1];
@@ -217,6 +254,10 @@ const accountingPool = mysqlPromise.createPool({
     connectionLimit: 5,
     queueLimit: 0,
 });
+instrumentLegacyWriteGuards(accountingPool, (operation) => ({
+    origin: "accounting services",
+    operation,
+}));
 const dbPromise = db.promise();
 
 const accountingEngine = new AccountingEngine(accountingPool);
@@ -955,342 +996,13 @@ app.delete("/api/vendor-products/:id", authenticate, (req, res) => {
     );
 });
 
-app.get("/api/vendors/:linkedProfileId/products", authenticate, (req, res) => {
-    const linkedProfileId = req.params.linkedProfileId;
-
-    db.query(
-        `SELECT vendor_name
-         FROM vendors
-         WHERE user_id = ? AND linked_profile_id = ?`,
-        [req.user.id, linkedProfileId],
-        (vendorErr, vendorRows) => {
-            if (vendorErr) return res.status(500).json({ message: vendorErr.message });
-            if (!vendorRows.length) return res.status(404).json({ message: "Vendor link not found" });
-
-            db.query(
-                `SELECT vp.*, ? AS vendor_name, ? AS linked_profile_id
-                 FROM vendor_products vp
-                 WHERE vp.user_id = ?
-                 ORDER BY vp.product_name ASC`,
-                [vendorRows[0].vendor_name, linkedProfileId, linkedProfileId],
-                (err, rows) => {
-                    if (err) return res.status(500).json({ message: err.message });
-                    res.json(rows);
-                }
-            );
-        }
-    );
-});
-
 // ===========================================================
 // INVENTORY
 // ===========================================================
 
-app.get("/api/inventory", authenticate, (req, res) => {
-    db.query(
-        "SELECT * FROM inventory WHERE user_id = ? ORDER BY created_at DESC",
-        [req.user.id],
-        (err, rows) => {
-            if (err) return res.status(500).json({ message: err.message });
-            res.json(rows);
-        }
-    );
-});
 
-app.get("/api/stock/balances", authenticate, async (req, res) => {
-    try {
-        const rows = await inventoryLedgerService.getStockBalances(req.user.id);
-        res.json(rows);
-    } catch (err) {
-        res.status(500).json({ message: err.message });
-    }
-});
 
-app.get("/api/items", authenticate, (req, res) => {
-    db.query(
-        `SELECT * FROM items WHERE company_id=? AND is_active=1 ORDER BY name ASC`,
-        [req.user.id],
-        (err, rows) => {
-            if (err) return res.status(500).json({ message: err.message });
-            res.json(rows);
-        }
-    );
-});
-
-app.post("/api/items", authenticate, async (req, res) => {
-    try {
-        const { name, sku, description, default_purchase_price, default_selling_price } = req.body;
-        if (!name) return res.status(400).json({ message: "name is required" });
-
-        const item = await inventoryLedgerService.findOrCreateItem({
-            companyId: req.user.id,
-            name,
-            sku: sku || null,
-            description: description || null,
-            defaultPurchasePrice: Number(default_purchase_price || 0),
-            defaultSellingPrice: Number(default_selling_price || 0),
-            newId,
-        });
-
-        res.status(201).json(item);
-    } catch (err) {
-        res.status(400).json({ message: err.message });
-    }
-});
-
-app.get("/api/warehouses", authenticate, (req, res) => {
-    db.query(
-        `SELECT * FROM warehouses WHERE company_id=? AND is_active=1 ORDER BY is_default DESC, name ASC`,
-        [req.user.id],
-        (err, rows) => {
-            if (err) return res.status(500).json({ message: err.message });
-            res.json(rows);
-        }
-    );
-});
-
-app.post("/api/warehouses", authenticate, (req, res) => {
-    const { name, code } = req.body;
-    if (!name || !code) return res.status(400).json({ message: "name and code are required" });
-
-    const id = newId();
-    db.query(
-        `INSERT INTO warehouses (id, company_id, name, code, is_default, is_active)
-         VALUES (?, ?, ?, ?, 0, 1)`,
-        [id, req.user.id, name, code],
-        (err) => {
-            if (err) return res.status(400).json({ message: err.message });
-            db.query("SELECT * FROM warehouses WHERE id=?", [id], (_e, rows) => res.status(201).json(rows[0]));
-        }
-    );
-});
-
-app.post("/api/stock/adjustment", authenticate, async (req, res) => {
-    try {
-        const { item_id, quantity_delta, unit_cost, reason } = req.body;
-        if (!item_id || quantity_delta === undefined) {
-            return res.status(400).json({ message: "item_id and quantity_delta are required" });
-        }
-
-        const result = await inventoryLedgerService.applyAdjustment({
-            companyId: req.user.id,
-            itemId: item_id,
-            quantityDelta: Number(quantity_delta),
-            unitCost: unit_cost === undefined ? null : Number(unit_cost),
-            reason: reason || "Manual inventory adjustment",
-            createdByUserId: req.user.id,
-            newId,
-        });
-
-        res.status(201).json(result);
-    } catch (err) {
-        res.status(400).json({ message: err.message });
-    }
-});
-
-app.post("/api/stock/transfer", authenticate, async (req, res) => {
-    try {
-        const { item_id, from_warehouse_id, to_warehouse_id, quantity, unit_cost, reason } = req.body;
-        if (!item_id || !from_warehouse_id || !to_warehouse_id || !quantity) {
-            return res.status(400).json({ message: "item_id, from_warehouse_id, to_warehouse_id and quantity are required" });
-        }
-
-        const result = await inventoryLedgerService.applyTransfer({
-            companyId: req.user.id,
-            itemId: item_id,
-            fromWarehouseId: from_warehouse_id,
-            toWarehouseId: to_warehouse_id,
-            quantity: Number(quantity),
-            unitCost: unit_cost === undefined ? null : Number(unit_cost),
-            reason: reason || "Warehouse transfer",
-            createdByUserId: req.user.id,
-            newId,
-        });
-
-        res.status(201).json(result);
-    } catch (err) {
-        res.status(400).json({ message: err.message });
-    }
-});
-
-app.post("/api/inventory", authenticate, (req, res) => {
-    const { linked_vendor_profile_id, vendor_product_id, stock_quantity, purchase_price, selling_price, payment_type } = req.body;
-
-    if (!linked_vendor_profile_id || !vendor_product_id || purchase_price === undefined || selling_price === undefined) {
-        return res.status(400).json({ message: "linked_vendor_profile_id, vendor_product_id, purchase_price and selling_price are required" });
-    }
-
-    db.query(
-        `SELECT vendor_name
-         FROM vendors
-         WHERE user_id = ? AND linked_profile_id = ?`,
-        [req.user.id, linked_vendor_profile_id],
-        (vendorErr, vendorRows) => {
-            if (vendorErr) return res.status(500).json({ message: vendorErr.message });
-            if (!vendorRows.length) return res.status(400).json({ message: "Select a linked vendor account first" });
-
-            db.query(
-                `SELECT *
-                 FROM vendor_products
-                 WHERE id = ? AND user_id = ?`,
-                [vendor_product_id, linked_vendor_profile_id],
-                (productErr, productRows) => {
-                    if (productErr) return res.status(500).json({ message: productErr.message });
-                    if (!productRows.length) return res.status(400).json({ message: "Selected product is not available from that vendor" });
-
-                    const vendorProduct = productRows[0];
-                    const invId = newId();
-                    const qty = parseInt(stock_quantity, 10) || 0;
-                    const pType = payment_type || "cash";
-                    const today = new Date().toISOString().slice(0, 10);
-                    const totalCost = parseFloat(purchase_price) * qty;
-                    const purchaseId = qty > 0 ? newId() : null;
-
-                    db.query(
-                        `INSERT INTO inventory
-                         (id, user_id, linked_vendor_profile_id, vendor_product_id, linked_purchase_id,
-                          product_name, sku, category, description, stock_quantity,
-                          purchase_price, selling_price, tax_rate, vendor_name, payment_type)
-                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-                        [
-                            invId,
-                            req.user.id,
-                            linked_vendor_profile_id,
-                            vendor_product_id,
-                            purchaseId,
-                            vendorProduct.product_name,
-                            vendorProduct.sku,
-                            vendorProduct.category || null,
-                            vendorProduct.description || null,
-                            qty,
-                            parseFloat(purchase_price),
-                            parseFloat(selling_price),
-                            vendorProduct.tax_rate === undefined ? 18 : parseFloat(vendorProduct.tax_rate),
-                            vendorRows[0].vendor_name,
-                            pType,
-                        ],
-                        (err) => {
-                            if (err) {
-                                if (err.code === "ER_DUP_ENTRY") {
-                                    return res.status(400).json({ message: "This product is already in your inventory" });
-                                }
-                                return res.status(500).json({ message: err.message });
-                            }
-
-                            if (purchaseId) {
-                                const paidStatus = pType === "cash" ? "paid" : "pending";
-                                db.query(
-                                    `INSERT INTO purchases
-                                     (id, user_id, vendor_name, product_name, quantity, amount,
-                                      purchase_date, payment_type, payment_status)
-                                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-                                    [
-                                        purchaseId,
-                                        req.user.id,
-                                        vendorRows[0].vendor_name,
-                                        vendorProduct.product_name,
-                                        qty,
-                                        totalCost,
-                                        today,
-                                        pType,
-                                        paidStatus,
-                                    ],
-                                    (pErr) => { if (pErr) console.error("[AUTO-PURCHASE]", pErr.message); }
-                                );
-
-                            }
-
-                            db.query("SELECT * FROM inventory WHERE id = ?", [invId], (_e, rows) => res.status(201).json(rows[0]));
-                        }
-                    );
-                }
-            );
-        }
-    );
-});
-
-app.put("/api/inventory/:id", authenticate, (req, res) => {
-    const { linked_vendor_profile_id, vendor_product_id, stock_quantity, purchase_price, selling_price, payment_type } = req.body;
-
-    if (!linked_vendor_profile_id || !vendor_product_id || purchase_price === undefined || selling_price === undefined) {
-        return res.status(400).json({ message: "linked_vendor_profile_id, vendor_product_id, purchase_price and selling_price are required" });
-    }
-
-    db.query(
-        `SELECT vendor_name
-         FROM vendors
-         WHERE user_id = ? AND linked_profile_id = ?`,
-        [req.user.id, linked_vendor_profile_id],
-        (vendorErr, vendorRows) => {
-            if (vendorErr) return res.status(500).json({ message: vendorErr.message });
-            if (!vendorRows.length) return res.status(400).json({ message: "Select a linked vendor account first" });
-
-            db.query(
-                `SELECT *
-                 FROM vendor_products
-                 WHERE id = ? AND user_id = ?`,
-                [vendor_product_id, linked_vendor_profile_id],
-                (productErr, productRows) => {
-                    if (productErr) return res.status(500).json({ message: productErr.message });
-                    if (!productRows.length) return res.status(400).json({ message: "Selected product is not available from that vendor" });
-
-                    const vendorProduct = productRows[0];
-
-                    db.query(
-                        `UPDATE inventory
-                         SET linked_vendor_profile_id=?, vendor_product_id=?, product_name=?, sku=?, category=?, description=?,
-                             stock_quantity=?, purchase_price=?, selling_price=?, tax_rate=?, vendor_name=?, payment_type=?, updated_at=NOW()
-                         WHERE id=? AND user_id=?`,
-                        [
-                            linked_vendor_profile_id,
-                            vendor_product_id,
-                            vendorProduct.product_name,
-                            vendorProduct.sku,
-                            vendorProduct.category || null,
-                            vendorProduct.description || null,
-                            parseInt(stock_quantity, 10) || 0,
-                            parseFloat(purchase_price),
-                            parseFloat(selling_price),
-                            vendorProduct.tax_rate === undefined ? 18 : parseFloat(vendorProduct.tax_rate),
-                            vendorRows[0].vendor_name,
-                            payment_type || "cash",
-                            req.params.id,
-                            req.user.id,
-                        ],
-                        (err, result) => {
-                            if (err) {
-                                if (err.code === "ER_DUP_ENTRY") {
-                                    return res.status(400).json({ message: "This product is already in your inventory" });
-                                }
-                                return res.status(500).json({ message: err.message });
-                            }
-                            if (!result.affectedRows) return res.status(404).json({ message: "Item not found" });
-                            db.query("SELECT * FROM inventory WHERE id = ?", [req.params.id], (_e, rows) => res.json(rows[0]));
-                        }
-                    );
-                }
-            );
-        }
-    );
-});
-
-app.delete("/api/inventory/:id", authenticate, (req, res) => {
-    auditService.logAction({
-        actorUserId: req.user.id,
-        companyId: req.user.id,
-        entityType: "inventory_item",
-        entityId: req.params.id,
-        actionType: "delete_attempt",
-        reason: "Legacy inventory hard delete blocked",
-        ipAddress: getRequestMeta(req).ipAddress,
-        userAgent: getRequestMeta(req).userAgent,
-        route: getRequestMeta(req).route,
-        method: getRequestMeta(req).method,
-    }).catch(() => { });
-    return res.status(409).json({ message: "Inventory items cannot be hard deleted. Use stock adjustments or deactivate the item instead." });
-});
-
-app.post("/api/inventory", authenticate, (req, res) => {
+app.post("/api/_legacy_disabled/inventory", authenticate, (req, res) => {
     const { product_name, sku, category, description, stock_quantity,
         purchase_price, selling_price, tax_rate, vendor_name, payment_type } = req.body;
 
@@ -1349,7 +1061,7 @@ app.post("/api/inventory", authenticate, (req, res) => {
     );
 });
 
-app.put("/api/inventory/:id", authenticate, (req, res) => {
+app.put("/api/_legacy_disabled/inventory/:id", authenticate, (req, res) => {
     const { product_name, sku, category, description, stock_quantity,
         purchase_price, selling_price, tax_rate, vendor_name, payment_type } = req.body;
     db.query(
@@ -1368,7 +1080,7 @@ app.put("/api/inventory/:id", authenticate, (req, res) => {
     );
 });
 
-app.delete("/api/inventory/:id", authenticate, (req, res) => {
+app.delete("/api/_legacy_disabled/inventory/:id", authenticate, (req, res) => {
     auditService.logAction({
         actorUserId: req.user.id,
         companyId: req.user.id,
@@ -1389,6 +1101,7 @@ app.delete("/api/inventory/:id", authenticate, (req, res) => {
 // ===========================================================
 
 app.get("/api/invoices", authenticate, (req, res) => {
+    logLegacyEndpointUsage(req, "read", "/api/accounting/sales-invoices");
     db.query(
         "SELECT * FROM invoices WHERE user_id = ? AND status!='cancelled' ORDER BY created_at DESC",
         [req.user.id],
@@ -1400,83 +1113,15 @@ app.get("/api/invoices", authenticate, (req, res) => {
 });
 
 app.post("/api/invoices", authenticate, (req, res) => {
-    const { invoice_no, client_name, amount, tax_amount, total_amount,
-        status, invoice_date, due_date, notes, items } = req.body;
-
-    if (!invoice_no || !client_name || !amount || !due_date)
-        return res.status(400).json({ message: "invoice_no, client_name, amount and due_date are required" });
-
-    const id = newId();
-    const finalStatus = status || "pending";
-    const finalTotal = parseFloat(total_amount || amount);
-    const today = new Date().toISOString().slice(0, 10);
-
-    db.query(
-        `INSERT INTO invoices
-      (id, user_id, invoice_no, client_name, amount, tax_amount, total_amount,
-       status, invoice_date, due_date, notes)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [id, req.user.id, invoice_no, client_name, amount, tax_amount || 0,
-            finalTotal, finalStatus, invoice_date || today, due_date, notes || null],
-        async (err) => {
-            if (err) return res.status(500).json({ message: err.message });
-
-            try {
-                if (Array.isArray(items) && items.length) {
-                    await inventoryLedgerService.applySaleIssue({
-                        companyId: req.user.id,
-                        invoiceId: id,
-                        lines: items,
-                        createdByUserId: req.user.id,
-                        newId,
-                        costingMethod: "weighted_average",
-                    });
-                }
-            } catch (stockErr) {
-                db.query("UPDATE invoices SET status='cancelled', deleted_at=NOW() WHERE id=? AND user_id=?", [id, req.user.id], () => {
-                    return res.status(400).json({ message: stockErr.message });
-                });
-                return;
-            }
-
-            db.query("SELECT * FROM invoices WHERE id = ?", [id], (e, rows) => res.status(201).json(rows[0]));
-        }
-    );
+    return respondLegacyWriteDeprecated(req, res, "/api/accounting/sales-invoices");
 });
 
 app.put("/api/invoices/:id", authenticate, (req, res) => {
-    const invoiceId = req.params.id;
-    const userId = req.user.id;
-    const { invoice_no, client_name, amount, tax_amount, total_amount,
-        status, invoice_date, due_date, payment_date, notes } = req.body;
-    const finalTotal = parseFloat(total_amount || amount);
-
-    db.query(
-        `UPDATE invoices
-         SET invoice_no=?, client_name=?, amount=?, tax_amount=?, total_amount=?,
-             status=?, invoice_date=?, due_date=?, payment_date=?, notes=?, updated_at=NOW()
-         WHERE id=? AND user_id=?`,
-        [invoice_no, client_name, amount, tax_amount || 0, finalTotal,
-            status, invoice_date, due_date, payment_date || null, notes || null,
-            invoiceId, userId],
-        (err, result) => {
-            if (err) return res.status(500).json({ message: err.message });
-            if (!result.affectedRows) return res.status(404).json({ message: "Invoice not found" });
-            db.query("SELECT * FROM invoices WHERE id = ?", [invoiceId], (e, rows) => res.json(rows[0]));
-        }
-    );
+    return respondLegacyWriteDeprecated(req, res, "/api/accounting/sales-invoices/:id");
 });
 
 app.delete("/api/invoices/:id", authenticate, (req, res) => {
-    db.query(
-        "UPDATE invoices SET status='cancelled', deleted_at=NOW(), updated_at=NOW() WHERE id=? AND user_id=? AND status!='paid'",
-        [req.params.id, req.user.id],
-        (err, result) => {
-            if (err) return res.status(500).json({ message: err.message });
-            if (!result.affectedRows) return res.status(404).json({ message: "Invoice not found" });
-            res.json({ message: "Invoice cancelled" });
-        }
-    );
+    return respondLegacyWriteDeprecated(req, res, "/api/accounting/sales-invoices/:id/void");
 });
 
 // ===========================================================
@@ -1484,6 +1129,7 @@ app.delete("/api/invoices/:id", authenticate, (req, res) => {
 // ===========================================================
 
 app.get("/api/sales", authenticate, (req, res) => {
+    logLegacyEndpointUsage(req, "read", "/api/accounting/sales-invoices");
     db.query("SELECT * FROM sales WHERE user_id = ? ORDER BY sale_date DESC",
         [req.user.id], (err, rows) => {
             if (err) return res.status(500).json({ message: err.message });
@@ -1492,21 +1138,7 @@ app.get("/api/sales", authenticate, (req, res) => {
 });
 
 app.post("/api/sales", authenticate, (req, res) => {
-    const { client_name, amount, sale_date, notes } = req.body;
-    if (!client_name || !amount)
-        return res.status(400).json({ message: "client_name and amount are required" });
-
-    const id = newId();
-    const today = new Date().toISOString().slice(0, 10);
-
-    db.query(
-        "INSERT INTO sales (id, user_id, client_name, amount, sale_date, notes) VALUES (?, ?, ?, ?, ?, ?)",
-        [id, req.user.id, client_name, amount, sale_date || today, notes || null],
-        (err) => {
-            if (err) return res.status(500).json({ message: err.message });
-            db.query("SELECT * FROM sales WHERE id = ?", [id], (e, rows) => res.status(201).json(rows[0]));
-        }
-    );
+    return respondLegacyWriteDeprecated(req, res, "/api/accounting/sales-invoices");
 });
 
 // ===========================================================
@@ -1514,6 +1146,7 @@ app.post("/api/sales", authenticate, (req, res) => {
 // ===========================================================
 
 app.get("/api/purchases", authenticate, (req, res) => {
+    logLegacyEndpointUsage(req, "read", "/api/accounting/purchase-bills");
     db.query("SELECT * FROM purchases WHERE user_id = ? AND COALESCE(status,'posted')!='void' ORDER BY purchase_date DESC",
         [req.user.id], (err, rows) => {
             if (err) return res.status(500).json({ message: err.message });
@@ -1522,47 +1155,7 @@ app.get("/api/purchases", authenticate, (req, res) => {
 });
 
 app.post("/api/purchases", authenticate, (req, res) => {
-    const { vendor_name, product_name, quantity, amount, purchase_date,
-        payment_type, payment_status, notes, sku } = req.body;
-    if (!vendor_name || !product_name || !amount)
-        return res.status(400).json({ message: "vendor_name, product_name and amount are required" });
-
-    const id = newId();
-    const pType = payment_type || "cash";
-    const pStat = pType === "cash" ? "paid" : (payment_status || "pending");
-    const today = new Date().toISOString().slice(0, 10);
-
-    db.query(
-        `INSERT INTO purchases
-      (id, user_id, vendor_name, product_name, quantity, amount, purchase_date,
-       payment_type, payment_status, notes)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [id, req.user.id, vendor_name, product_name, quantity || 1, amount,
-            purchase_date || today, pType, pStat, notes || null],
-        async (err) => {
-            if (err) return res.status(500).json({ message: err.message });
-
-            try {
-                await inventoryLedgerService.applyPurchaseReceipt({
-                    companyId: req.user.id,
-                    productName: product_name,
-                    sku: sku || null,
-                    quantity: Number(quantity || 1),
-                    totalAmount: Number(amount),
-                    purchaseId: id,
-                    createdByUserId: req.user.id,
-                    newId,
-                });
-            } catch (stockErr) {
-                db.query("UPDATE purchases SET status='void', deleted_at=NOW() WHERE id=? AND user_id=?", [id, req.user.id], () => {
-                    return res.status(400).json({ message: stockErr.message });
-                });
-                return;
-            }
-
-            db.query("SELECT * FROM purchases WHERE id = ?", [id], (e, rows) => res.status(201).json(rows[0]));
-        }
-    );
+    return respondLegacyWriteDeprecated(req, res, "/api/accounting/purchase-bills");
 });
 
 // ===========================================================
@@ -1570,22 +1163,27 @@ app.post("/api/purchases", authenticate, (req, res) => {
 // ===========================================================
 
 app.post("/api/v2/sales-invoices", authenticate, async (req, res) => {
+    logLegacyEndpointUsage(req, "write", "/api/accounting/sales-invoices");
     res.status(410).json({ message: "Legacy /api/v2 sales invoice draft endpoint disabled. Use /api/accounting/sales-invoices instead." });
 });
 
 app.post("/api/v2/purchase-bills", authenticate, async (req, res) => {
+    logLegacyEndpointUsage(req, "write", "/api/accounting/purchase-bills");
     res.status(410).json({ message: "Legacy /api/v2 purchase bill draft endpoint disabled. Use /api/accounting/purchase-bills instead." });
 });
 
 app.post("/api/v2/sales-invoices/:id/post", authenticate, async (req, res) => {
+    logLegacyEndpointUsage(req, "write", "/api/accounting/sales-invoices/:id/post");
     res.status(410).json({ message: "Legacy /api/v2 sales invoice posting endpoint disabled. Use /api/accounting/sales-invoices/:id/post instead." });
 });
 
 app.post("/api/v2/purchase-bills/:id/post", authenticate, async (req, res) => {
+    logLegacyEndpointUsage(req, "write", "/api/accounting/purchase-bills/:id/post");
     res.status(410).json({ message: "Legacy /api/v2 purchase bill posting endpoint disabled. Use /api/accounting/purchase-bills/:id/post instead." });
 });
 
 app.get("/api/v2/sales-invoices", authenticate, (req, res) => {
+    logLegacyEndpointUsage(req, "read", "/api/accounting/sales-invoices");
     db.query(
         `SELECT * FROM sales_invoice_headers WHERE user_id=? ORDER BY created_at DESC`,
         [req.user.id],
@@ -1597,6 +1195,7 @@ app.get("/api/v2/sales-invoices", authenticate, (req, res) => {
 });
 
 app.get("/api/v2/sales-invoices/:id/lines", authenticate, (req, res) => {
+    logLegacyEndpointUsage(req, "read", "/api/accounting/sales-invoices/:id");
     db.query(
         `SELECT l.*
          FROM sales_invoice_lines l
@@ -1612,6 +1211,7 @@ app.get("/api/v2/sales-invoices/:id/lines", authenticate, (req, res) => {
 });
 
 app.get("/api/v2/purchase-bills", authenticate, (req, res) => {
+    logLegacyEndpointUsage(req, "read", "/api/accounting/purchase-bills");
     db.query(
         `SELECT * FROM purchase_bill_headers WHERE user_id=? ORDER BY created_at DESC`,
         [req.user.id],
@@ -1623,6 +1223,7 @@ app.get("/api/v2/purchase-bills", authenticate, (req, res) => {
 });
 
 app.get("/api/v2/purchase-bills/:id/lines", authenticate, (req, res) => {
+    logLegacyEndpointUsage(req, "read", "/api/accounting/purchase-bills/:id");
     db.query(
         `SELECT l.*
          FROM purchase_bill_lines l
@@ -1638,16 +1239,7 @@ app.get("/api/v2/purchase-bills/:id/lines", authenticate, (req, res) => {
 });
 
 app.delete("/api/purchases/:id", authenticate, (req, res) => {
-    db.query(
-        "UPDATE purchases SET status='void', deleted_at=NOW() WHERE id=? AND user_id=?",
-        [req.params.id, req.user.id],
-        (err, result) => {
-            if (err) return res.status(500).json({ message: err.message });
-            if (!result.affectedRows) return res.status(404).json({ message: "Not found" });
-
-            res.json({ message: "Purchase voided" });
-        }
-    );
+    return respondLegacyWriteDeprecated(req, res, "/api/accounting/purchase-bills/:id/void");
 });
 
 // ===========================================================

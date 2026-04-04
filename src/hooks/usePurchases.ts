@@ -4,11 +4,12 @@ import { toast } from "sonner";
 
 export interface Purchase {
   id: string;
-  product_id: string | null;
-  product_name: string;
-  quantity: number;
+  bill_no: string;
+  vendor_id: string | null;
+  vendor_name: string;
   amount: number;
   purchase_date: string;
+  status: string;
   created_at: string;
 }
 
@@ -19,7 +20,21 @@ export const usePurchases = () => {
   const fetchPurchases = async () => {
     try {
       const data = await purchasesApi.getAll();
-      setPurchases(Array.isArray(data) ? data : data.data || []);
+      const rows = Array.isArray(data) ? data : data.data || [];
+      setPurchases(
+        rows
+          .filter((row: any) => !["draft", "void"].includes(String(row.status || "").toLowerCase()))
+          .map((row: any) => ({
+            id: row.id,
+            bill_no: row.bill_no,
+            vendor_id: row.vendor_id || null,
+            vendor_name: row.vendor_name || "Unknown Vendor",
+            amount: Number(row.total_amount) || 0,
+            purchase_date: row.bill_date,
+            status: row.status,
+            created_at: row.created_at,
+          }))
+      );
     } catch (error: any) {
       toast.error("Failed to load purchases");
       console.error(error);
@@ -32,19 +47,12 @@ export const usePurchases = () => {
     fetchPurchases();
   }, []);
 
-  const addPurchase = async (purchase: { product_name: string; quantity: number; amount: number; purchase_date: string }) => {
+  const addPurchase = async () => {
     try {
-      await purchasesApi.add({
-        product_name: purchase.product_name,
-        quantity: purchase.quantity,
-        amount: purchase.amount,
-        purchase_date: purchase.purchase_date,
-      });
-      toast.success("Purchase recorded");
-      await fetchPurchases();
-      return true;
+      await purchasesApi.add();
+      return false;
     } catch (error: any) {
-      toast.error(error.message || "Failed to add purchase");
+      toast.error(error.message || "Purchases are now created through accounting purchase bills");
       return false;
     }
   };

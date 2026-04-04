@@ -349,38 +349,6 @@ class PurchaseBillService {
     };
   }
 
-  async syncLegacyPurchase(conn, actorUserId, header, lines) {
-    const firstLine = lines[0] || {};
-    await conn.execute(
-      `INSERT INTO purchases
-        (id, user_id, purchase_id, vendor_name, product_name, quantity, total_amount, due_date, status, purchase_date, payment_type)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-       ON DUPLICATE KEY UPDATE
-         purchase_id = VALUES(purchase_id),
-         vendor_name = VALUES(vendor_name),
-         product_name = VALUES(product_name),
-         quantity = VALUES(quantity),
-         total_amount = VALUES(total_amount),
-         due_date = VALUES(due_date),
-         status = VALUES(status),
-         purchase_date = VALUES(purchase_date),
-         payment_type = VALUES(payment_type)`,
-      [
-        header.id,
-        actorUserId,
-        header.bill_no,
-        header.vendor_name,
-        firstLine.description || header.vendor_name,
-        lines.reduce((sum, line) => sum + Number(line.quantity || 0), 0),
-        header.total_amount,
-        header.due_date,
-        header.status === "void" ? "cancelled" : header.status,
-        header.bill_date,
-        "credit",
-      ]
-    );
-  }
-
   async getPaymentSnapshot(conn, billId, totalAmount) {
     const row = await this.queryOne(
       conn,
@@ -477,7 +445,6 @@ class PurchaseBillService {
       );
 
       const header = await this.queryOne(conn, `SELECT * FROM purchase_bill_headers WHERE id = ?`, [billId]);
-      await this.syncLegacyPurchase(conn, actorUserId, header, lines);
       const hydrated = await this.hydrateBill(conn, header);
       await this.writeAudit(conn, {
         actorUserId,
@@ -555,7 +522,6 @@ class PurchaseBillService {
       );
 
       const header = await this.queryOne(conn, `SELECT * FROM purchase_bill_headers WHERE id = ?`, [billId]);
-      await this.syncLegacyPurchase(conn, actorUserId, header, lines);
       const hydrated = await this.hydrateBill(conn, header);
       await this.writeAudit(conn, {
         actorUserId,
@@ -601,7 +567,6 @@ class PurchaseBillService {
 
       const updated = await this.queryOne(conn, `SELECT * FROM purchase_bill_headers WHERE id = ?`, [billId]);
       const lines = await this.queryAll(conn, `SELECT * FROM purchase_bill_lines WHERE purchase_bill_id = ? ORDER BY line_no ASC`, [billId]);
-      await this.syncLegacyPurchase(conn, actorUserId, updated, lines);
       const hydrated = await this.hydrateBill(conn, updated);
       await this.writeAudit(conn, {
         actorUserId,
@@ -748,7 +713,6 @@ class PurchaseBillService {
       });
 
       const updated = await this.queryOne(conn, `SELECT * FROM purchase_bill_headers WHERE id = ?`, [billId]);
-      await this.syncLegacyPurchase(conn, actorUserId, updated, lines);
       const hydrated = await this.hydrateBill(conn, updated);
       await this.writeAudit(conn, {
         actorUserId,
@@ -798,7 +762,6 @@ class PurchaseBillService {
 
       const updated = await this.queryOne(conn, `SELECT * FROM purchase_bill_headers WHERE id = ?`, [billId]);
       const lines = await this.queryAll(conn, `SELECT * FROM purchase_bill_lines WHERE purchase_bill_id = ? ORDER BY line_no ASC`, [billId]);
-      await this.syncLegacyPurchase(conn, actorUserId, updated, lines);
       const hydrated = await this.hydrateBill(conn, updated);
       await this.writeAudit(conn, {
         actorUserId,

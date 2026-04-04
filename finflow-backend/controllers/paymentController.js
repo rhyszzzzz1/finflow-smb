@@ -57,9 +57,11 @@ class PaymentController {
     return res.json(rows);
   };
 
-  blockDerivedWrite = async (_req, res) => {
+  blockDerivedWrite = async (req, res) => {
+    console.warn(`[LEGACY_ENDPOINT] Legacy endpoint used — migrate frontend [write] ${req.method} ${req.originalUrl}`);
     return res.status(410).json({
-      message: "Receivables/payables are derived from invoices/purchases and payment allocations. Direct edits are disabled.",
+      message: "This endpoint is deprecated. Use accounting APIs instead.",
+      detail: "Receivables/payables are derived from invoices/purchases and payment allocations. Direct edits are disabled.",
     });
   };
 }

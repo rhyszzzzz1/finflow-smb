@@ -11,7 +11,7 @@ import { toast } from "sonner";
 import { useAuth } from "@/contexts/AuthContext";
 import { KYCDocumentUpload } from "@/components/KYC/KYCDocumentUpload";
 
-const API_BASE = "http://localhost:5001";
+const API_BASE = "";
 
 interface DocumentFile {
   file: File | null;
