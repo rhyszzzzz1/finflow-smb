@@ -1,18 +1,35 @@
-import { WorkflowDocumentPage } from "@/components/accounting/WorkflowDocumentPage";
+import { DocumentWorkflowPage } from "@/components/accounting/document-editor/DocumentWorkflowPage";
+import { GoodsReceiptCreateFlow } from "@/components/procurement/GoodsReceiptCreateFlow";
 import { useGoodsReceipts } from "@/hooks/useGoodsReceipts";
 import { useMasterData } from "@/hooks/useMasterData";
-import { buildSingleLine, statusVisible, today } from "./documentPageUtils";
+import { statusVisible, today } from "./documentPageUtils";
+import type { DocumentTypeConfig } from "@/components/accounting/document-editor/documentTypes";
+import { goodsReceiptApi } from "@/services/api";
 
 export const GoodsReceiptsPage = () => {
   const { vendorOptions, itemOptions, purchaseOrderOptions } = useMasterData();
   const { goodsReceipts, isLoading, createDraft, updateDraft, postReceipt, voidReceipt } = useGoodsReceipts();
 
+  const config: DocumentTypeConfig = {
+    type: "goods_receipt",
+    counterpartyLabel: "Vendor",
+    counterpartyField: "vendor_id",
+    dateField: "receipt_date",
+    allowServices: false,
+    unitAmountLabel: "Unit cost",
+    quantityLabel: "Received qty",
+    showDiscounts: false,
+    showTaxRate: false,
+    supportsSources: true,
+    supportsUnitPrice: false,
+    supportsUnitCost: true,
+  };
+
   return (
-    <WorkflowDocumentPage
+    <DocumentWorkflowPage
       title="Goods Receipts"
       description="Record received inventory operationally and financially before supplier bills arrive."
-      dialogTitle="Record Goods Receipt"
-      createLabel="New Goods Receipt"
+      config={config}
       isLoading={isLoading}
       items={goodsReceipts}
       getItemId={(item: any) => item.id}
@@ -29,77 +46,65 @@ export const GoodsReceiptsPage = () => {
         { label: "Post", onClick: (item: any) => postReceipt(item.id), visible: (item: any) => statusVisible(item.status, "draft", "approved") },
         { label: "Void", onClick: (item: any) => voidReceipt(item.id), visible: (item: any) => !statusVisible(item.status, "void", "posted"), variant: "destructive" },
       ]}
-      initialValues={{
-        vendor_id: "",
-        purchase_order_id: "",
-        receipt_date: today(),
-        item_id: "",
-        description: "",
-        quantity: "1",
-        unit_cost: "0",
-        notes: "",
+      counterpartyOptions={vendorOptions}
+      itemOptions={itemOptions}
+      references={{ sourcePurchaseOrderOptions: purchaseOrderOptions }}
+      createInitialState={{
+        header: { vendor_id: "", purchase_order_id: "", receipt_date: today(), notes: "" },
+        lines: [],
       }}
-      buildFields={() => [
-        { key: "vendor_id", label: "Vendor", type: "select", required: true, options: vendorOptions },
-        { key: "purchase_order_id", label: "Purchase Order", type: "select", options: purchaseOrderOptions, placeholder: "Optional PO link" },
-        { key: "receipt_date", label: "Receipt Date", type: "date", required: true },
-        { key: "item_id", label: "Item", type: "select", required: true, options: itemOptions },
-        { key: "description", label: "Description", type: "text", required: true, helpText: "Goods receipt is a receiving workflow and should describe the received line clearly." },
-        { key: "quantity", label: "Received Quantity", type: "number", required: true, step: "0.01" },
-        { key: "unit_cost", label: "Unit Cost", type: "number", required: true, step: "0.01" },
-        { key: "notes", label: "Notes", type: "textarea" },
-      ]}
-      onCreate={(values) =>
+      canEditDraft={(item: any) => statusVisible(item.status, "draft")}
+      fetchById={goodsReceiptApi.getById}
+      toDetailPayload={(full: any) => ({
+        id: full.id,
+        status: full.status,
+        documentNo: full.receipt_number || full.id,
+        header: {
+          vendor_id: full.vendor_id,
+          purchase_order_id: full.purchase_order_id,
+          receipt_date: full.receipt_date,
+          notes: full.notes || "",
+        },
+        lines: Array.isArray(full.lines) ? full.lines : [],
+        totals: { subtotal: full.subtotal_amount, tax: full.tax_amount, total: full.total_amount },
+      })}
+      toEditorState={(full: any) => ({
+        header: {
+          vendor_id: full.vendor_id || "",
+          purchase_order_id: full.purchase_order_id || "",
+          receipt_date: full.receipt_date || today(),
+          notes: full.notes || "",
+        },
+        lines: Array.isArray(full.lines) ? full.lines : [],
+      })}
+      onCreateDraft={async (state) =>
         createDraft({
-          vendor_id: values.vendor_id,
-          purchase_order_id: values.purchase_order_id || null,
-          receipt_date: values.receipt_date,
-          notes: values.notes || null,
-          lines: [
-            {
-              ...buildSingleLine({
-                description: values.description,
-                quantity: values.quantity,
-                unitCost: values.unit_cost,
-                itemId: values.item_id || undefined,
-              }),
-              received_quantity: Number(values.quantity || 0),
-            },
-          ],
+          vendor_id: state.header.vendor_id,
+          purchase_order_id: state.header.purchase_order_id || null,
+          receipt_date: state.header.receipt_date,
+          notes: state.header.notes || null,
+          lines: state.lines,
         })
       }
-      onUpdate={(id, values) =>
+      onUpdateDraft={async (id, state) =>
         updateDraft(id, {
-          vendor_id: values.vendor_id,
-          purchase_order_id: values.purchase_order_id || null,
-          receipt_date: values.receipt_date,
-          notes: values.notes || null,
-          lines: [
-            {
-              ...buildSingleLine({
-                description: values.description,
-                quantity: values.quantity,
-                unitCost: values.unit_cost,
-                itemId: values.item_id || undefined,
-              }),
-              received_quantity: Number(values.quantity || 0),
-            },
-          ],
+          vendor_id: state.header.vendor_id,
+          purchase_order_id: state.header.purchase_order_id || null,
+          receipt_date: state.header.receipt_date,
+          notes: state.header.notes || null,
+          lines: state.lines,
         })
       }
-      toEditValues={(item: any) => {
-        const line = item.lines?.[0] || {};
-        return {
-          vendor_id: item.vendor_id || "",
-          purchase_order_id: item.purchase_order_id || "",
-          receipt_date: item.receipt_date || today(),
-          item_id: line.item_id || "",
-          description: line.description || "",
-          quantity: String(line.received_quantity ?? line.quantity ?? "1"),
-          unit_cost: String(line.unit_cost ?? "0"),
-          notes: item.notes || "",
-        };
-      }}
+      renderCreate={({ config, counterpartyOptions, itemOptions, references, onCancel, onCreate }) => (
+        <GoodsReceiptCreateFlow
+          config={config}
+          vendorOptions={counterpartyOptions}
+          itemOptions={itemOptions}
+          purchaseOrderOptions={references?.sourcePurchaseOrderOptions || []}
+          onCancel={onCancel}
+          onCreate={onCreate}
+        />
+      )}
     />
   );
 };

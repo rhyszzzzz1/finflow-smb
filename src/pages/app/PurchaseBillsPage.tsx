@@ -1,7 +1,10 @@
-import { WorkflowDocumentPage } from "@/components/accounting/WorkflowDocumentPage";
+import { DocumentWorkflowPage } from "@/components/accounting/document-editor/DocumentWorkflowPage";
+import { PurchaseBillCreateFlow } from "@/components/procurement/PurchaseBillCreateFlow";
 import { useMasterData } from "@/hooks/useMasterData";
 import { usePurchaseBills } from "@/hooks/usePurchaseBills";
-import { buildSingleLine, statusVisible, today } from "./documentPageUtils";
+import { statusVisible, today } from "./documentPageUtils";
+import type { DocumentTypeConfig } from "@/components/accounting/document-editor/documentTypes";
+import { purchaseBillApi } from "@/services/api";
 
 export const PurchaseBillsPage = () => {
   const { vendorOptions, itemOptions, goodsReceiptOptions, purchaseOrderOptions } = useMasterData();
@@ -18,12 +21,26 @@ export const PurchaseBillsPage = () => {
     voidBill,
   } = usePurchaseBills();
 
+  const config: DocumentTypeConfig = {
+    type: "purchase_bill",
+    counterpartyLabel: "Vendor",
+    counterpartyField: "vendor_id",
+    dateField: "bill_date",
+    allowServices: true,
+    unitAmountLabel: "Unit cost",
+    quantityLabel: "Quantity",
+    showDiscounts: true,
+    showTaxRate: true,
+    supportsSources: true,
+    supportsUnitPrice: false,
+    supportsUnitCost: true,
+  };
+
   return (
-    <WorkflowDocumentPage
+    <DocumentWorkflowPage
       title="Purchase Bills"
       description="Handle direct supplier bills and GRN-linked billing while keeping AP and GRNI behavior visible."
-      dialogTitle="Create Purchase Bill"
-      createLabel="New Purchase Bill"
+      config={config}
       isLoading={isLoading}
       items={purchaseBills}
       getItemId={(item) => item.id}
@@ -45,81 +62,78 @@ export const PurchaseBillsPage = () => {
         { label: "Post", onClick: (item) => postBill(item.id), visible: (item: any) => statusVisible(item.base_status || item.status, "approved") },
         { label: "Void", onClick: (item) => voidBill(item.id), visible: (item: any) => !statusVisible(item.base_status || item.status, "void", "posted"), variant: "destructive" },
       ]}
-      initialValues={{
-        vendor_id: "",
-        purchase_order_id: "",
-        goods_receipt_id: "",
-        bill_date: today(),
-        due_date: today(),
-        item_id: "",
-        description: "",
-        quantity: "1",
-        unit_cost: "0",
-        notes: "",
+      counterpartyOptions={vendorOptions}
+      itemOptions={itemOptions}
+      references={{ sourcePurchaseOrderOptions: purchaseOrderOptions, sourceGoodsReceiptOptions: goodsReceiptOptions }}
+      extraFields={[{ key: "due_date", label: "Due Date", type: "date" }]}
+      createInitialState={{
+        header: { vendor_id: "", purchase_order_id: "", goods_receipt_id: "", bill_date: today(), due_date: today(), notes: "" },
+        lines: [],
       }}
-      buildFields={() => [
-        { key: "vendor_id", label: "Vendor", type: "select", required: true, options: vendorOptions },
-        { key: "purchase_order_id", label: "Purchase Order", type: "select", options: purchaseOrderOptions, placeholder: "Optional PO link" },
-        { key: "goods_receipt_id", label: "Goods Receipt", type: "select", options: goodsReceiptOptions, placeholder: "Optional GRN link" },
-        { key: "bill_date", label: "Bill Date", type: "date", required: true },
-        { key: "due_date", label: "Due Date", type: "date" },
-        { key: "item_id", label: "Inventory Item", type: "select", required: true, options: itemOptions, placeholder: "Select billed inventory item" },
-        { key: "description", label: "Description", type: "text", required: true },
-        { key: "quantity", label: "Quantity", type: "number", required: true, step: "0.01" },
-        { key: "unit_cost", label: "Unit Cost", type: "number", required: true, step: "0.01" },
-        { key: "notes", label: "Notes", type: "textarea" },
-      ]}
-      onCreate={(values) =>
+      canEditDraft={(item: any) => statusVisible(item.base_status || item.status, "draft", "rejected")}
+      fetchById={purchaseBillApi.getById}
+      toDetailPayload={(full: any) => ({
+        id: full.id,
+        status: full.base_status || full.status,
+        documentNo: full.bill_number || full.bill_no || full.id,
+        header: {
+          vendor_id: full.vendor_id,
+          purchase_order_id: full.purchase_order_id,
+          goods_receipt_id: full.goods_receipt_id,
+          bill_date: full.bill_date,
+          due_date: full.due_date,
+          notes: full.notes || "",
+        },
+        lines: Array.isArray(full.lines) ? full.lines : [],
+        totals: { subtotal: full.subtotal_amount, tax: full.tax_amount, total: full.total_amount },
+      })}
+      toEditorState={(full: any) => ({
+        header: {
+          vendor_id: full.vendor_id || "",
+          purchase_order_id: full.purchase_order_id || "",
+          goods_receipt_id: full.goods_receipt_id || "",
+          bill_date: full.bill_date || today(),
+          due_date: full.due_date || today(),
+          notes: full.notes || "",
+        },
+        lines: Array.isArray(full.lines) ? full.lines : [],
+      })}
+      onCreateDraft={async (state) =>
         createDraft({
-          vendor_id: values.vendor_id,
-          purchase_order_id: values.purchase_order_id || null,
-          goods_receipt_id: values.goods_receipt_id || null,
-          bill_date: values.bill_date,
-          due_date: values.due_date || null,
-          notes: values.notes || null,
-          lines: [
-            buildSingleLine({
-              description: values.description,
-              quantity: values.quantity,
-              unitCost: values.unit_cost,
-              itemId: values.item_id || undefined,
-            }),
-          ],
+          vendor_id: state.header.vendor_id,
+          purchase_order_id: state.header.purchase_order_id || null,
+          goods_receipt_id: state.header.goods_receipt_id || null,
+          bill_date: state.header.bill_date,
+          due_date: state.header.due_date || null,
+          notes: state.header.notes || null,
+          lines: state.lines,
         })
       }
-      onUpdate={(id, values) =>
+      onUpdateDraft={async (id, state) =>
         updateDraft(id, {
-          vendor_id: values.vendor_id,
-          purchase_order_id: values.purchase_order_id || null,
-          goods_receipt_id: values.goods_receipt_id || null,
-          bill_date: values.bill_date,
-          due_date: values.due_date || null,
-          notes: values.notes || null,
-          lines: [
-            buildSingleLine({
-              description: values.description,
-              quantity: values.quantity,
-              unitCost: values.unit_cost,
-              itemId: values.item_id || undefined,
-            }),
-          ],
+          vendor_id: state.header.vendor_id,
+          purchase_order_id: state.header.purchase_order_id || null,
+          goods_receipt_id: state.header.goods_receipt_id || null,
+          bill_date: state.header.bill_date,
+          due_date: state.header.due_date || null,
+          notes: state.header.notes || null,
+          lines: state.lines,
         })
       }
-      toEditValues={(item: any) => {
-        const line = item.lines?.[0] || {};
-        return {
-          vendor_id: item.vendor_id || "",
-          purchase_order_id: item.purchase_order_id || "",
-          goods_receipt_id: item.goods_receipt_id || "",
-          bill_date: item.bill_date || today(),
-          due_date: item.due_date || today(),
-          item_id: line.item_id || "",
-          description: line.description || "",
-          quantity: String(line.quantity ?? "1"),
-          unit_cost: String(line.unit_cost ?? "0"),
-          notes: item.notes || "",
-        };
-      }}
+      renderCreate={({ config, counterpartyOptions, itemOptions, references, defaultInitialState, onCancel, onCreate }) => (
+        <PurchaseBillCreateFlow
+          config={config}
+          vendorOptions={counterpartyOptions}
+          itemOptions={itemOptions}
+          goodsReceiptOptions={references?.sourceGoodsReceiptOptions || []}
+          purchaseOrderOptions={references?.sourcePurchaseOrderOptions || []}
+          onCancel={onCancel}
+          onCreate={async (state) => {
+            // Enforce bill type semantics by how header + lines are constructed in the flow component.
+            await onCreate(state);
+          }}
+        />
+      )}
     />
   );
 };

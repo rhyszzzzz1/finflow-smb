@@ -1,18 +1,34 @@
-import { WorkflowDocumentPage } from "@/components/accounting/WorkflowDocumentPage";
+import { DocumentWorkflowPage } from "@/components/accounting/document-editor/DocumentWorkflowPage";
 import { useMasterData } from "@/hooks/useMasterData";
 import { usePurchaseDebitNotes } from "@/hooks/usePurchaseDebitNotes";
-import { buildSingleLine, statusVisible, today } from "./documentPageUtils";
+import { statusVisible, today } from "./documentPageUtils";
+import type { DocumentTypeConfig } from "@/components/accounting/document-editor/documentTypes";
+import { purchaseDebitNoteApi } from "@/services/api";
 
 export const PurchaseDebitNotesPage = () => {
   const { vendorOptions, itemOptions, purchaseBillOptions } = useMasterData();
   const { purchaseDebitNotes, isLoading, createDraft, updateDraft, approveDebitNote, postDebitNote, voidDebitNote } = usePurchaseDebitNotes();
 
+  const config: DocumentTypeConfig = {
+    type: "purchase_debit_note",
+    counterpartyLabel: "Vendor",
+    counterpartyField: "vendor_id",
+    dateField: "debit_note_date",
+    allowServices: true,
+    unitAmountLabel: "Unit cost",
+    quantityLabel: "Quantity",
+    showDiscounts: false,
+    showTaxRate: false,
+    supportsSources: true,
+    supportsUnitPrice: false,
+    supportsUnitCost: true,
+  };
+
   return (
-    <WorkflowDocumentPage
+    <DocumentWorkflowPage
       title="Purchase Debit Notes"
       description="Record supplier-side purchase reversals and postable procurement adjustments."
-      dialogTitle="Create Purchase Debit Note"
-      createLabel="New Debit Note"
+      config={config}
       isLoading={isLoading}
       items={purchaseDebitNotes}
       getItemId={(item: any) => item.id}
@@ -30,76 +46,70 @@ export const PurchaseDebitNotesPage = () => {
         { label: "Post", onClick: (item: any) => postDebitNote(item.id), visible: (item: any) => statusVisible(item.status, "approved") },
         { label: "Void", onClick: (item: any) => voidDebitNote(item.id), visible: (item: any) => !statusVisible(item.status, "void", "posted"), variant: "destructive" },
       ]}
-      initialValues={{
-        vendor_id: "",
-        related_purchase_bill_id: "",
-        debit_note_date: today(),
-        item_id: "",
-        description: "",
-        quantity: "1",
-        unit_cost: "0",
-        return_to_vendor: "no",
-        notes: "",
-      }}
-      buildFields={() => [
-        { key: "vendor_id", label: "Vendor", type: "select", required: true, options: vendorOptions },
-        { key: "related_purchase_bill_id", label: "Related Bill", type: "select", options: purchaseBillOptions, placeholder: "Optional source bill" },
-        { key: "debit_note_date", label: "Debit Note Date", type: "date", required: true },
-        { key: "item_id", label: "Item", type: "select", options: itemOptions, placeholder: "Optional returned item" },
-        { key: "description", label: "Description", type: "text", required: true },
-        { key: "quantity", label: "Quantity", type: "number", required: true, step: "0.01" },
-        { key: "unit_cost", label: "Unit Cost", type: "number", required: true, step: "0.01" },
-        { key: "return_to_vendor", label: "Return to Vendor", type: "select", options: [{ value: "no", label: "No" }, { value: "yes", label: "Yes" }] },
-        { key: "notes", label: "Notes", type: "textarea" },
+      counterpartyOptions={vendorOptions}
+      itemOptions={itemOptions}
+      references={{ sourcePurchaseBillOptions: purchaseBillOptions }}
+      extraFields={[
+        {
+          key: "return_to_vendor",
+          label: "Return to Vendor",
+          type: "select",
+          options: [
+            { value: "no", label: "No" },
+            { value: "yes", label: "Yes" },
+          ],
+        },
       ]}
-      onCreate={(values) =>
-        createDraft({
-          vendor_id: values.vendor_id,
-          related_purchase_bill_id: values.related_purchase_bill_id || null,
-          debit_note_date: values.debit_note_date,
-          return_to_vendor: values.return_to_vendor === "yes",
-          notes: values.notes || null,
-          lines: [
-            buildSingleLine({
-              description: values.description,
-              quantity: values.quantity,
-              unitCost: values.unit_cost,
-              itemId: values.item_id || undefined,
-            }),
-          ],
-        })
-      }
-      onUpdate={(id, values) =>
-        updateDraft(id, {
-          vendor_id: values.vendor_id,
-          related_purchase_bill_id: values.related_purchase_bill_id || null,
-          debit_note_date: values.debit_note_date,
-          return_to_vendor: values.return_to_vendor === "yes",
-          notes: values.notes || null,
-          lines: [
-            buildSingleLine({
-              description: values.description,
-              quantity: values.quantity,
-              unitCost: values.unit_cost,
-              itemId: values.item_id || undefined,
-            }),
-          ],
-        })
-      }
-      toEditValues={(item: any) => {
-        const line = item.lines?.[0] || {};
-        return {
-          vendor_id: item.vendor_id || "",
-          related_purchase_bill_id: item.related_purchase_bill_id || "",
-          debit_note_date: item.debit_note_date || today(),
-          item_id: line.item_id || "",
-          description: line.description || "",
-          quantity: String(line.quantity ?? "1"),
-          unit_cost: String(line.unit_cost ?? "0"),
-          return_to_vendor: item.return_to_vendor ? "yes" : "no",
-          notes: item.notes || "",
-        };
+      createInitialState={{
+        header: { vendor_id: "", related_purchase_bill_id: "", debit_note_date: today(), return_to_vendor: "no", notes: "" },
+        lines: [],
       }}
+      canEditDraft={(item: any) => statusVisible(item.status, "draft")}
+      fetchById={purchaseDebitNoteApi.getById}
+      toDetailPayload={(full: any) => ({
+        id: full.id,
+        status: full.status,
+        documentNo: full.debit_note_number || full.id,
+        header: {
+          vendor_id: full.vendor_id,
+          related_purchase_bill_id: full.related_purchase_bill_id,
+          debit_note_date: full.debit_note_date,
+          return_to_vendor: full.return_to_vendor ? "yes" : "no",
+          notes: full.notes || "",
+        },
+        lines: Array.isArray(full.lines) ? full.lines : [],
+        totals: { subtotal: full.subtotal_amount, tax: full.tax_amount, total: full.total_amount },
+      })}
+      toEditorState={(full: any) => ({
+        header: {
+          vendor_id: full.vendor_id || "",
+          related_purchase_bill_id: full.related_purchase_bill_id || "",
+          debit_note_date: full.debit_note_date || today(),
+          return_to_vendor: full.return_to_vendor ? "yes" : "no",
+          notes: full.notes || "",
+        },
+        lines: Array.isArray(full.lines) ? full.lines : [],
+      })}
+      onCreateDraft={async (state) =>
+        createDraft({
+          vendor_id: state.header.vendor_id,
+          related_purchase_bill_id: state.header.related_purchase_bill_id || null,
+          debit_note_date: state.header.debit_note_date,
+          return_to_vendor: state.header.return_to_vendor === "yes",
+          notes: state.header.notes || null,
+          lines: state.lines,
+        })
+      }
+      onUpdateDraft={async (id, state) =>
+        updateDraft(id, {
+          vendor_id: state.header.vendor_id,
+          related_purchase_bill_id: state.header.related_purchase_bill_id || null,
+          debit_note_date: state.header.debit_note_date,
+          return_to_vendor: state.header.return_to_vendor === "yes",
+          notes: state.header.notes || null,
+          lines: state.lines,
+        })
+      }
     />
   );
 };

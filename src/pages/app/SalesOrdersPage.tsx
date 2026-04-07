@@ -1,18 +1,34 @@
-import { WorkflowDocumentPage } from "@/components/accounting/WorkflowDocumentPage";
+import { DocumentWorkflowPage } from "@/components/accounting/document-editor/DocumentWorkflowPage";
 import { useMasterData } from "@/hooks/useMasterData";
 import { useSalesOrders } from "@/hooks/useSalesOrders";
-import { buildSingleLine, statusVisible, today } from "./documentPageUtils";
+import { statusVisible, today } from "./documentPageUtils";
+import type { DocumentTypeConfig } from "@/components/accounting/document-editor/documentTypes";
+import { salesOrderApi } from "@/services/api";
 
 export const SalesOrdersPage = () => {
   const { customerOptions, itemOptions, salesQuoteOptions } = useMasterData();
   const { salesOrders, isLoading, createDraft, acceptOrder, convertToInvoice, voidOrder } = useSalesOrders();
 
+  const config: DocumentTypeConfig = {
+    type: "sales_order",
+    counterpartyLabel: "Customer",
+    counterpartyField: "customer_id",
+    dateField: "order_date",
+    allowServices: true,
+    unitAmountLabel: "Unit price",
+    quantityLabel: "Ordered qty",
+    showDiscounts: false,
+    showTaxRate: false,
+    supportsSources: true,
+    supportsUnitPrice: true,
+    supportsUnitCost: false,
+  };
+
   return (
-    <WorkflowDocumentPage
+    <DocumentWorkflowPage
       title="Sales Orders"
       description="Track accepted commercial commitments before they become posted sales invoices."
-      dialogTitle="Create Sales Order"
-      createLabel="New Sales Order"
+      config={config}
       isLoading={isLoading}
       items={salesOrders}
       getItemId={(item: any) => item.id}
@@ -40,46 +56,49 @@ export const SalesOrdersPage = () => {
         { label: "Converted Orders", value: String(salesOrders.filter((order: any) => statusVisible(order.status, "converted")).length) },
         { label: "Open Orders", value: String(salesOrders.filter((order: any) => !statusVisible(order.status, "void", "converted")).length) },
       ]}
-      initialValues={{
-        customer_id: "",
-        sales_quote_id: "",
-        order_date: today(),
-        expected_invoice_date: today(),
-        description: "",
-        quantity: "1",
-        unit_price: "0",
-        item_id: "",
-        notes: "",
-      }}
-      buildFields={() => [
-        { key: "customer_id", label: "Customer", type: "select", required: true, options: customerOptions },
-        { key: "sales_quote_id", label: "Source Quote", type: "select", options: salesQuoteOptions, placeholder: "Optional quote link" },
-        { key: "order_date", label: "Order Date", type: "date", required: true },
+      counterpartyOptions={customerOptions}
+      itemOptions={itemOptions}
+      references={{ sourceSalesQuoteOptions: salesQuoteOptions }}
+      extraFields={[
         { key: "expected_invoice_date", label: "Expected Invoice Date", type: "date" },
-        { key: "item_id", label: "Item", type: "select", options: itemOptions, placeholder: "Optional item master link" },
-        { key: "description", label: "Description", type: "text", required: true },
-        { key: "quantity", label: "Ordered Quantity", type: "number", required: true, step: "0.01" },
-        { key: "unit_price", label: "Unit Price", type: "number", required: true, step: "0.01" },
-        { key: "notes", label: "Notes", type: "textarea" },
       ]}
-      onCreate={(values) =>
+      createInitialState={{
+        header: { customer_id: "", sales_quote_id: "", order_date: today(), expected_invoice_date: today(), notes: "" },
+        lines: [],
+      }}
+      fetchById={salesOrderApi.getById}
+      toDetailPayload={(full: any) => ({
+        id: full.id,
+        status: full.status,
+        documentNo: full.order_number || full.order_no || full.id,
+        header: {
+          customer_id: full.customer_id,
+          order_date: full.order_date,
+          expected_invoice_date: full.expected_invoice_date,
+          sales_quote_id: full.sales_quote_id,
+          notes: full.notes || "",
+        },
+        lines: Array.isArray(full.lines) ? full.lines : [],
+        totals: { subtotal: full.subtotal_amount, tax: full.tax_amount, total: full.total_amount },
+      })}
+      toEditorState={(full: any) => ({
+        header: {
+          customer_id: full.customer_id || "",
+          sales_quote_id: full.sales_quote_id || "",
+          order_date: full.order_date || today(),
+          expected_invoice_date: full.expected_invoice_date || "",
+          notes: full.notes || "",
+        },
+        lines: Array.isArray(full.lines) ? full.lines : [],
+      })}
+      onCreateDraft={async (state) =>
         createDraft({
-          customer_id: values.customer_id,
-          sales_quote_id: values.sales_quote_id || null,
-          order_date: values.order_date,
-          expected_invoice_date: values.expected_invoice_date || null,
-          notes: values.notes || null,
-          lines: [
-            {
-              ...buildSingleLine({
-                description: values.description,
-                quantity: values.quantity,
-                unitPrice: values.unit_price,
-                itemId: values.item_id || undefined,
-              }),
-              ordered_quantity: Number(values.quantity || 0),
-            },
-          ],
+          customer_id: state.header.customer_id,
+          sales_quote_id: state.header.sales_quote_id || null,
+          order_date: state.header.order_date,
+          expected_invoice_date: state.header.expected_invoice_date || null,
+          notes: state.header.notes || null,
+          lines: state.lines,
         })
       }
     />

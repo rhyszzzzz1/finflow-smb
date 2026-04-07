@@ -1,18 +1,34 @@
-import { WorkflowDocumentPage } from "@/components/accounting/WorkflowDocumentPage";
+import { DocumentWorkflowPage } from "@/components/accounting/document-editor/DocumentWorkflowPage";
 import { useMasterData } from "@/hooks/useMasterData";
 import { useSalesQuotes } from "@/hooks/useSalesQuotes";
-import { buildSingleLine, statusVisible, today } from "./documentPageUtils";
+import { statusVisible, today } from "./documentPageUtils";
+import type { DocumentTypeConfig } from "@/components/accounting/document-editor/documentTypes";
+import { salesQuoteApi } from "@/services/api";
 
 export const SalesQuotesPage = () => {
   const { customerOptions, itemOptions } = useMasterData();
   const { salesQuotes, isLoading, createDraft, sendQuote, acceptQuote, convertToOrder, voidQuote } = useSalesQuotes();
 
+  const config: DocumentTypeConfig = {
+    type: "sales_quote",
+    counterpartyLabel: "Customer",
+    counterpartyField: "customer_id",
+    dateField: "quote_date",
+    allowServices: true,
+    unitAmountLabel: "Unit price",
+    quantityLabel: "Quantity",
+    showDiscounts: false,
+    showTaxRate: false,
+    supportsSources: false,
+    supportsUnitPrice: true,
+    supportsUnitCost: false,
+  };
+
   return (
-    <WorkflowDocumentPage
+    <DocumentWorkflowPage
       title="Sales Quotes"
       description="Prepare estimates, send them to customers, and convert accepted quotes into sales orders."
-      dialogTitle="Create Sales Quote"
-      createLabel="New Quote"
+      config={config}
       isLoading={isLoading}
       items={salesQuotes}
       getItemId={(item: any) => item.id}
@@ -41,40 +57,45 @@ export const SalesQuotesPage = () => {
         { label: "Accepted Quotes", value: String(salesQuotes.filter((quote: any) => statusVisible(quote.status, "accepted")).length) },
         { label: "Converted Quotes", value: String(salesQuotes.filter((quote: any) => statusVisible(quote.status, "converted")).length) },
       ]}
-      initialValues={{
-        customer_id: "",
-        quote_date: today(),
-        valid_until: today(),
-        description: "",
-        quantity: "1",
-        unit_price: "0",
-        item_id: "",
-        notes: "",
-      }}
-      buildFields={() => [
-        { key: "customer_id", label: "Customer", type: "select", required: true, options: customerOptions },
-        { key: "quote_date", label: "Quote Date", type: "date", required: true },
-        { key: "valid_until", label: "Valid Until", type: "date" },
-        { key: "item_id", label: "Item", type: "select", options: itemOptions, placeholder: "Optional stock/service item" },
-        { key: "description", label: "Description", type: "text", required: true, placeholder: "Workscope or item summary" },
-        { key: "quantity", label: "Quantity", type: "number", required: true, step: "0.01" },
-        { key: "unit_price", label: "Unit Price", type: "number", required: true, step: "0.01" },
-        { key: "notes", label: "Notes", type: "textarea", placeholder: "Commercial notes or terms" },
+      counterpartyOptions={customerOptions}
+      itemOptions={itemOptions}
+      extraFields={[
+        { key: "valid_until", label: "Valid Until", type: "date", placeholder: "Optional" },
       ]}
-      onCreate={(values) =>
+      createInitialState={{
+        header: { customer_id: "", quote_date: today(), valid_until: today(), notes: "" },
+        lines: [],
+      }}
+      fetchById={salesQuoteApi.getById}
+      toDetailPayload={(full: any) => ({
+        id: full.id,
+        status: full.status,
+        documentNo: full.quote_number || full.quote_no || full.id,
+        header: {
+          customer_id: full.customer_id,
+          quote_date: full.quote_date,
+          valid_until: full.valid_until,
+          notes: full.notes || "",
+        },
+        lines: Array.isArray(full.lines) ? full.lines : [],
+        totals: { subtotal: full.subtotal_amount, tax: full.tax_amount, total: full.total_amount },
+      })}
+      toEditorState={(full: any) => ({
+        header: {
+          customer_id: full.customer_id || "",
+          quote_date: full.quote_date || today(),
+          valid_until: full.valid_until || "",
+          notes: full.notes || "",
+        },
+        lines: Array.isArray(full.lines) ? full.lines : [],
+      })}
+      onCreateDraft={async (state) =>
         createDraft({
-          customer_id: values.customer_id,
-          quote_date: values.quote_date,
-          valid_until: values.valid_until || null,
-          notes: values.notes || null,
-          lines: [
-            buildSingleLine({
-              description: values.description,
-              quantity: values.quantity,
-              unitPrice: values.unit_price,
-              itemId: values.item_id || undefined,
-            }),
-          ],
+          customer_id: state.header.customer_id,
+          quote_date: state.header.quote_date,
+          valid_until: state.header.valid_until || null,
+          notes: state.header.notes || null,
+          lines: state.lines,
         })
       }
     />

@@ -222,6 +222,23 @@ class ChartOfAccountsService {
     this.pool = pool;
   }
 
+  async resolveCompanyId(conn, actorUserId) {
+    const company = await this.queryOne(
+      conn,
+      `SELECT id
+         FROM companies
+        WHERE legacy_profile_id = ?
+           OR owner_profile_id = ?
+        LIMIT 1`,
+      [actorUserId, actorUserId]
+    ).catch(() => null);
+
+    if (!company?.id) {
+      return actorUserId;
+    }
+    return company.id;
+  }
+
   static getDefaultAccountCodes() {
     return { ...DEFAULT_ACCOUNT_CODES };
   }
@@ -428,6 +445,37 @@ class ChartOfAccountsService {
     }
 
     return roots;
+  }
+
+  async listPostingAccounts(actorUserId, options = {}) {
+    const conn = await this.pool.getConnection();
+    try {
+      const companyId = await this.resolveCompanyId(conn, actorUserId);
+      const params = [companyId];
+      let where = "WHERE company_id = ? AND allow_posting = 1 AND is_active = 1";
+
+      if (options.type) {
+        where += " AND account_type = ?";
+        params.push(String(options.type));
+      }
+
+      if (options.q) {
+        where += " AND (account_code LIKE ? OR account_name LIKE ?)";
+        const q = `%${String(options.q)}%`;
+        params.push(q, q);
+      }
+
+      return this.queryAll(
+        conn,
+        `SELECT id, account_code, account_name, account_type, normal_balance
+           FROM chart_of_accounts
+           ${where}
+           ORDER BY account_code ASC`,
+        params
+      );
+    } finally {
+      conn.release();
+    }
   }
 }
 

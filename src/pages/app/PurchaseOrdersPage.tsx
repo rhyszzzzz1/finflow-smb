@@ -1,18 +1,34 @@
-import { WorkflowDocumentPage } from "@/components/accounting/WorkflowDocumentPage";
+import { DocumentWorkflowPage } from "@/components/accounting/document-editor/DocumentWorkflowPage";
 import { useMasterData } from "@/hooks/useMasterData";
 import { usePurchaseOrders } from "@/hooks/usePurchaseOrders";
-import { buildSingleLine, statusVisible, today } from "./documentPageUtils";
+import { statusVisible, today } from "./documentPageUtils";
+import type { DocumentTypeConfig } from "@/components/accounting/document-editor/documentTypes";
+import { purchaseOrderApi } from "@/services/api";
 
 export const PurchaseOrdersPage = () => {
   const { vendorOptions, itemOptions } = useMasterData();
   const { purchaseOrders, isLoading, createDraft, updateDraft, approveOrder, voidOrder } = usePurchaseOrders();
 
+  const config: DocumentTypeConfig = {
+    type: "purchase_order",
+    counterpartyLabel: "Vendor",
+    counterpartyField: "vendor_id",
+    dateField: "order_date",
+    allowServices: true,
+    unitAmountLabel: "Unit cost",
+    quantityLabel: "Ordered qty",
+    showDiscounts: false,
+    showTaxRate: false,
+    supportsSources: false,
+    supportsUnitPrice: false,
+    supportsUnitCost: true,
+  };
+
   return (
-    <WorkflowDocumentPage
+    <DocumentWorkflowPage
       title="Purchase Orders"
       description="Prepare supplier orders before receiving stock or matching supplier invoices."
-      dialogTitle="Create Purchase Order"
-      createLabel="New Purchase Order"
+      config={config}
       isLoading={isLoading}
       items={purchaseOrders}
       getItemId={(item: any) => item.id}
@@ -29,77 +45,55 @@ export const PurchaseOrdersPage = () => {
         { label: "Approve", onClick: (item: any) => approveOrder(item.id), visible: (item: any) => statusVisible(item.status, "draft") },
         { label: "Void", onClick: (item: any) => voidOrder(item.id), visible: (item: any) => !statusVisible(item.status, "void", "approved"), variant: "destructive" },
       ]}
-      initialValues={{
-        vendor_id: "",
-        order_date: today(),
-        expected_date: today(),
-        item_id: "",
-        description: "",
-        quantity: "1",
-        unit_cost: "0",
-        notes: "",
+      counterpartyOptions={vendorOptions}
+      itemOptions={itemOptions}
+      extraFields={[{ key: "expected_date", label: "Expected Date", type: "date" }]}
+      createInitialState={{
+        header: { vendor_id: "", order_date: today(), expected_date: today(), notes: "" },
+        lines: [],
       }}
-      buildFields={() => [
-        { key: "vendor_id", label: "Vendor", type: "select", required: true, options: vendorOptions },
-        { key: "order_date", label: "Order Date", type: "date", required: true },
-        { key: "expected_date", label: "Expected Date", type: "date" },
-        { key: "item_id", label: "Item", type: "select", options: itemOptions, placeholder: "Optional item master link" },
-        { key: "description", label: "Description", type: "text", required: true },
-        { key: "quantity", label: "Ordered Quantity", type: "number", required: true, step: "0.01" },
-        { key: "unit_cost", label: "Unit Cost", type: "number", required: true, step: "0.01" },
-        { key: "notes", label: "Notes", type: "textarea" },
-      ]}
-      onCreate={(values) =>
+      canEditDraft={(item: any) => statusVisible(item.status, "draft")}
+      fetchById={purchaseOrderApi.getById}
+      toDetailPayload={(full: any) => ({
+        id: full.id,
+        status: full.status,
+        documentNo: full.po_number || full.order_number || full.id,
+        header: {
+          vendor_id: full.vendor_id,
+          order_date: full.order_date,
+          expected_date: full.expected_date,
+          notes: full.notes || "",
+        },
+        lines: Array.isArray(full.lines) ? full.lines : [],
+        totals: { subtotal: full.subtotal_amount, tax: full.tax_amount, total: full.total_amount },
+      })}
+      toEditorState={(full: any) => ({
+        header: {
+          vendor_id: full.vendor_id || "",
+          order_date: full.order_date || today(),
+          expected_date: full.expected_date || "",
+          notes: full.notes || "",
+        },
+        lines: Array.isArray(full.lines) ? full.lines : [],
+      })}
+      onCreateDraft={async (state) =>
         createDraft({
-          vendor_id: values.vendor_id,
-          order_date: values.order_date,
-          expected_date: values.expected_date || null,
-          notes: values.notes || null,
-          lines: [
-            {
-              ...buildSingleLine({
-                description: values.description,
-                quantity: values.quantity,
-                unitCost: values.unit_cost,
-                itemId: values.item_id || undefined,
-              }),
-              ordered_quantity: Number(values.quantity || 0),
-            },
-          ],
+          vendor_id: state.header.vendor_id,
+          order_date: state.header.order_date,
+          expected_date: state.header.expected_date || null,
+          notes: state.header.notes || null,
+          lines: state.lines,
         })
       }
-      onUpdate={(id, values) =>
+      onUpdateDraft={async (id, state) =>
         updateDraft(id, {
-          vendor_id: values.vendor_id,
-          order_date: values.order_date,
-          expected_date: values.expected_date || null,
-          notes: values.notes || null,
-          lines: [
-            {
-              ...buildSingleLine({
-                description: values.description,
-                quantity: values.quantity,
-                unitCost: values.unit_cost,
-                itemId: values.item_id || undefined,
-              }),
-              ordered_quantity: Number(values.quantity || 0),
-            },
-          ],
+          vendor_id: state.header.vendor_id,
+          order_date: state.header.order_date,
+          expected_date: state.header.expected_date || null,
+          notes: state.header.notes || null,
+          lines: state.lines,
         })
       }
-      toEditValues={(item: any) => {
-        const line = item.lines?.[0] || {};
-        return {
-          vendor_id: item.vendor_id || "",
-          order_date: item.order_date || today(),
-          expected_date: item.expected_date || today(),
-          item_id: line.item_id || "",
-          description: line.description || "",
-          quantity: String(line.ordered_quantity ?? line.quantity ?? "1"),
-          unit_cost: String(line.unit_cost ?? "0"),
-          notes: item.notes || "",
-        };
-      }}
     />
   );
 };

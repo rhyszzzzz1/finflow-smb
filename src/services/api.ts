@@ -184,6 +184,12 @@ export const paymentApi = {
   getVendorBalance: async (id: string) => apiRequest(`/balances/vendors/${id}`),
 };
 
+// AUTHORITATIVE: chart of accounts (read-only listing for UI selection)
+export const chartOfAccountsApi = {
+  listPostingAccounts: async (params?: { type?: string; q?: string }) =>
+    apiRequest(withAccountingPath(`/chart-of-accounts${buildQuery({ type: params?.type, q: params?.q })}`)),
+};
+
 // AUTHORITATIVE: derived read-only balances
 export const receivablesReadApi = {
   getAll: async () => apiRequest("/receivables"),

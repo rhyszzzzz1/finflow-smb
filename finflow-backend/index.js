@@ -46,6 +46,7 @@ const { PurchaseOrderController } = require("./controllers/purchaseOrderControll
 const { GoodsReceiptController } = require("./controllers/goodsReceiptController");
 const { SalesCreditNoteController } = require("./controllers/salesCreditNoteController");
 const { PurchaseDebitNoteController } = require("./controllers/purchaseDebitNoteController");
+const { ChartOfAccountsController } = require("./controllers/chartOfAccountsController");
 const { InventoryController } = require("./controllers/inventoryController");
 const { BusinessRelationshipController } = require("./controllers/businessRelationshipController");
 const { InventoryRepository } = require("./repositories/inventoryRepository");
@@ -59,6 +60,7 @@ const { createPurchaseOrderRoutes } = require("./routes/purchaseOrderRoutes");
 const { createGoodsReceiptRoutes } = require("./routes/goodsReceiptRoutes");
 const { createSalesCreditNoteRoutes } = require("./routes/salesCreditNoteRoutes");
 const { createPurchaseDebitNoteRoutes } = require("./routes/purchaseDebitNoteRoutes");
+const { createChartOfAccountsRoutes } = require("./routes/chartOfAccountsRoutes");
 const { createInventoryRoutes } = require("./routes/inventoryRoutes");
 const { createBusinessRelationshipRoutes } = require("./routes/businessRelationshipRoutes");
 const { createAuditRequestMiddleware } = require("./middleware/auditRequestMiddleware");
@@ -411,6 +413,7 @@ const purchaseOrderController = new PurchaseOrderController(purchaseOrderService
 const goodsReceiptController = new GoodsReceiptController(goodsReceiptService);
 const salesCreditNoteController = new SalesCreditNoteController(salesCreditNoteService);
 const purchaseDebitNoteController = new PurchaseDebitNoteController(purchaseDebitNoteService);
+const chartOfAccountsController = new ChartOfAccountsController(chartOfAccountsService);
 const inventoryRepository = new InventoryRepository(dbPromise);
 const inventoryService = new InventoryService({
     inventoryRepository,
@@ -429,6 +432,7 @@ const purchaseOrderRoutes = createPurchaseOrderRoutes({ authenticate, purchaseOr
 const goodsReceiptRoutes = createGoodsReceiptRoutes({ authenticate, goodsReceiptController });
 const salesCreditNoteRoutes = createSalesCreditNoteRoutes({ authenticate, salesCreditNoteController });
 const purchaseDebitNoteRoutes = createPurchaseDebitNoteRoutes({ authenticate, purchaseDebitNoteController });
+const chartOfAccountsRoutes = createChartOfAccountsRoutes({ authenticate, chartOfAccountsController });
 const inventoryRoutes = createInventoryRoutes({ authenticate, inventoryController });
 const businessRelationshipRoutes = createBusinessRelationshipRoutes({ authenticate, businessRelationshipController });
 
@@ -843,6 +847,7 @@ app.use("/api/accounting", purchaseOrderRoutes);
 app.use("/api/accounting", goodsReceiptRoutes);
 app.use("/api/accounting", salesCreditNoteRoutes);
 app.use("/api/accounting", purchaseDebitNoteRoutes);
+app.use("/api/accounting", chartOfAccountsRoutes);
 app.use("/api", inventoryRoutes);
 
 // ===========================================================
