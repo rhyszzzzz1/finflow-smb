@@ -2,8 +2,8 @@
 
 function validatePurchaseBillPayload(body) {
   const errors = [];
-  if (!body.vendor_id) {
-    errors.push("vendor_id is required");
+  if (!(body.counterparty_id || body.vendor_id || body.vendor_name)) {
+    errors.push("counterparty_id, vendor_id, or vendor_name is required");
   }
   if (!Array.isArray(body.lines) || body.lines.length === 0) {
     errors.push("lines must be a non-empty array");
@@ -12,7 +12,9 @@ function validatePurchaseBillPayload(body) {
 
   for (let i = 0; i < body.lines.length; i += 1) {
     const line = body.lines[i] || {};
-    if (!line.description) errors.push(`lines[${i}].description is required`);
+    if (!line.description && !line.purchase_order_line_id && !line.goods_receipt_line_id) {
+      errors.push(`lines[${i}].description is required`);
+    }
     if (line.quantity === undefined || line.quantity === null) errors.push(`lines[${i}].quantity is required`);
     if (line.unit_cost === undefined || line.unit_cost === null) errors.push(`lines[${i}].unit_cost is required`);
     if (line.discount_type && !["none", "percentage", "fixed"].includes(line.discount_type)) {
@@ -31,6 +33,17 @@ function validatePurchaseBillPayload(body) {
   return errors;
 }
 
+function validateApprovalDecisionPayload(body, options = {}) {
+  const errors = [];
+  const requireComment = options.requireComment === true;
+  const comment = String(body?.comment || body?.reason || "").trim();
+  if (requireComment && !comment) {
+    errors.push("comment or reason is required");
+  }
+  return errors;
+}
+
 module.exports = {
   validatePurchaseBillPayload,
+  validateApprovalDecisionPayload,
 };

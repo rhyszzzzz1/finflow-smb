@@ -1,14 +1,53 @@
 import { NavLink } from "@/components/NavLink";
-import { LayoutDashboard, Package, FileText, CreditCard, BarChart3, Settings, Users } from "lucide-react";
+import {
+  BarChart3,
+  Building2,
+  CheckCircle2,
+  CreditCard,
+  FileText,
+  Handshake,
+  LayoutDashboard,
+  Package,
+  Settings,
+  ShoppingCart,
+  Users,
+} from "lucide-react";
 
-const menuItems = [
-  { icon: LayoutDashboard, label: "Dashboard", path: "/" },
-  { icon: Package, label: "Inventory", path: "/inventory" },
-  { icon: FileText, label: "Billing", path: "/billing" },
-  { icon: CreditCard, label: "Receivables / Payables", path: "/receivables" },
-  { icon: Users, label: "Clients & Vendors", path: "/clients" },
-  { icon: BarChart3, label: "Reports", path: "/reports" },
-  { icon: Settings, label: "Settings", path: "/settings" },
+const menuSections = [
+  {
+    title: "Overview",
+    items: [
+      { icon: LayoutDashboard, label: "Dashboard", path: "/" },
+    ],
+  },
+  {
+    title: "Sales",
+    items: [
+      { icon: FileText, label: "Quotes", path: "/sales/quotes" },
+      { icon: FileText, label: "Orders", path: "/sales/orders" },
+      { icon: Users, label: "Invoices", path: "/sales/invoices" },
+      { icon: CheckCircle2, label: "Credit Notes", path: "/sales/credit-notes" },
+    ],
+  },
+  {
+    title: "Procurement",
+    items: [
+      { icon: ShoppingCart, label: "Purchase Orders", path: "/procurement/orders" },
+      { icon: Package, label: "Goods Receipts", path: "/procurement/receipts" },
+      { icon: Building2, label: "Purchase Bills", path: "/procurement/bills" },
+      { icon: CheckCircle2, label: "Debit Notes", path: "/procurement/debit-notes" },
+    ],
+  },
+  {
+    title: "Operations",
+    items: [
+      { icon: Package, label: "Inventory", path: "/inventory" },
+      { icon: CreditCard, label: "Settlements", path: "/settlements" },
+      { icon: Handshake, label: "Relationships", path: "/relationships" },
+      { icon: BarChart3, label: "Reports", path: "/reports" },
+      { icon: Settings, label: "Settings", path: "/settings" },
+    ],
+  },
 ];
 
 export const Sidebar = () => {
@@ -19,18 +58,28 @@ export const Sidebar = () => {
         <p className="text-xs text-muted-foreground mt-1">Cloud Accounting for SMEs</p>
       </div>
       
-      <nav className="p-4 space-y-1">
-        {menuItems.map((item) => (
-          <NavLink
-            key={item.path}
-            to={item.path}
-            end={item.path === "/"}
-            className="flex items-center gap-3 px-4 py-3 rounded-lg text-sm font-medium text-foreground/70 hover:bg-secondary/50 hover:text-foreground transition-all duration-200"
-            activeClassName="bg-primary/10 text-primary hover:bg-primary/15"
-          >
-            <item.icon className="w-5 h-5" />
-            <span>{item.label}</span>
-          </NavLink>
+      <nav className="p-4 space-y-5">
+        {menuSections.map((section) => (
+          <div key={section.title} className="space-y-1">
+            <p className="px-4 text-[11px] font-semibold uppercase tracking-[0.16em] text-muted-foreground/70">
+              {section.title}
+            </p>
+            {section.items.map((item) => {
+              const Icon = item.icon;
+              return (
+                <NavLink
+                  key={item.path}
+                  to={item.path}
+                  end={item.path === "/"}
+                  className="flex items-center gap-3 px-4 py-3 rounded-lg text-sm font-medium text-foreground/70 hover:bg-secondary/50 hover:text-foreground transition-all duration-200"
+                  activeClassName="bg-primary/10 text-primary hover:bg-primary/15"
+                >
+                  <Icon className="w-5 h-5" />
+                  <span>{item.label}</span>
+                </NavLink>
+              );
+            })}
+          </div>
         ))}
       </nav>
       

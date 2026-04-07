@@ -8,6 +8,9 @@ const { validatePaymentPayload } = require("../validators/paymentValidator");
 function createPaymentRoutes({ authenticate, paymentController }) {
   const router = express.Router();
 
+  // AUTHORITATIVE(accounting-refactor): settlement happens through payments and
+  // payment_allocations. Receivables/payables below are read-only derived views,
+  // not standalone accounting entities.
   router.post(
     "/payments/apply",
     authenticate,
@@ -28,6 +31,9 @@ function createPaymentRoutes({ authenticate, paymentController }) {
   router.get("/balances/customers/:id", authenticate, asyncHandler(paymentController.getCustomerBalance));
   router.get("/balances/vendors/:id", authenticate, asyncHandler(paymentController.getVendorBalance));
 
+  // DEPRECATED(accounting-refactor): legacy frontend flows may still attempt to
+  // mutate receivable/payable rows directly. Keep these endpoints only so they
+  // fail loudly and intentionally during migration.
   router.post("/receivables", authenticate, asyncHandler(paymentController.blockDerivedWrite));
   router.put("/receivables/:id", authenticate, asyncHandler(paymentController.blockDerivedWrite));
   router.delete("/receivables/:id", authenticate, asyncHandler(paymentController.blockDerivedWrite));

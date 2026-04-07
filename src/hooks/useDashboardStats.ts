@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { accountingInvoiceApi, accountingReportsApi } from "@/services/api";
+import { accountingInvoiceApi, accountingReportsApi, goodsReceiptApi, purchaseOrderApi, salesOrderApi, salesQuoteApi } from "@/services/api";
 
 export interface DashboardStats {
   totalSales: number;
@@ -8,6 +8,12 @@ export interface DashboardStats {
   outstandingPayables: number;
   inventoryValue: number;
   inventoryCount: number;
+  draftSalesQuotes: number;
+  openSalesOrders: number;
+  invoicesAwaitingPosting: number;
+  openPurchaseOrders: number;
+  unbilledGoodsReceipts: number;
+  grniExposure: number;
   monthlySales: { month: string; sales: number }[];
 }
 
@@ -18,6 +24,12 @@ const defaultStats: DashboardStats = {
   outstandingPayables: 0,
   inventoryValue: 0,
   inventoryCount: 0,
+  draftSalesQuotes: 0,
+  openSalesOrders: 0,
+  invoicesAwaitingPosting: 0,
+  openPurchaseOrders: 0,
+  unbilledGoodsReceipts: 0,
+  grniExposure: 0,
   monthlySales: [],
 };
 
@@ -37,17 +49,45 @@ export const useDashboardStats = () => {
       const endDate = `${year}-12-31`;
       const asOfDate = new Date().toISOString().slice(0, 10);
 
-      const [profitLoss, arAging, apAging, stockSummary, invoices] = await Promise.all([
+      const [
+        profitLossResult,
+        arAgingResult,
+        apAgingResult,
+        stockSummaryResult,
+        invoicesResult,
+        salesQuotesResult,
+        salesOrdersResult,
+        purchaseOrdersResult,
+        goodsReceiptsResult,
+        grniResult,
+      ] = await Promise.allSettled([
         accountingReportsApi.getProfitLoss({ startDate, endDate }),
         accountingReportsApi.getARAging({ asOfDate }),
         accountingReportsApi.getAPAging({ asOfDate }),
         accountingReportsApi.getStockSummary({ asOfDate }),
         accountingInvoiceApi.list(),
+        salesQuoteApi.list(),
+        salesOrderApi.list(),
+        purchaseOrderApi.list(),
+        goodsReceiptApi.list(),
+        accountingReportsApi.getGRNIControlReconciliation({ asOfDate }),
       ]);
+
+      const profitLoss = profitLossResult.status === "fulfilled" ? profitLossResult.value : null;
+      const arAging = arAgingResult.status === "fulfilled" ? arAgingResult.value : null;
+      const apAging = apAgingResult.status === "fulfilled" ? apAgingResult.value : null;
+      const stockSummary = stockSummaryResult.status === "fulfilled" ? stockSummaryResult.value : null;
+      const invoices = invoicesResult.status === "fulfilled" ? invoicesResult.value : [];
+      const salesQuotes = salesQuotesResult.status === "fulfilled" ? salesQuotesResult.value : [];
+      const salesOrders = salesOrdersResult.status === "fulfilled" ? salesOrdersResult.value : [];
+      const purchaseOrders = purchaseOrdersResult.status === "fulfilled" ? purchaseOrdersResult.value : [];
+      const goodsReceipts = goodsReceiptsResult.status === "fulfilled" ? goodsReceiptsResult.value : [];
+      const grni = grniResult.status === "fulfilled" ? grniResult.value : null;
 
       const monthlySalesMap = new Map<string, number>();
       const monthNames = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-      (Array.isArray(invoices) ? invoices : []).forEach((invoice: any) => {
+      const invoiceRows = Array.isArray(invoices) ? invoices : [];
+      invoiceRows.forEach((invoice: any) => {
         const status = String(invoice.status || "").toLowerCase();
         if (["draft", "void"].includes(status)) return;
         const invoiceDate = invoice.invoice_date ? new Date(invoice.invoice_date) : null;
@@ -63,6 +103,12 @@ export const useDashboardStats = () => {
         outstandingPayables: toNumber(apAging?.buckets?.total),
         inventoryValue: toNumber(stockSummary?.totals?.total_on_hand_value),
         inventoryCount: toNumber(stockSummary?.totals?.total_items),
+        draftSalesQuotes: (Array.isArray(salesQuotes) ? salesQuotes : []).filter((quote: any) => String(quote.status || "").toLowerCase() === "draft").length,
+        openSalesOrders: (Array.isArray(salesOrders) ? salesOrders : []).filter((order: any) => !["void", "converted"].includes(String(order.status || "").toLowerCase())).length,
+        invoicesAwaitingPosting: invoiceRows.filter((invoice: any) => ["draft", "approved", "pending_approval", "rejected"].includes(String(invoice.base_status || invoice.status || "").toLowerCase())).length,
+        openPurchaseOrders: (Array.isArray(purchaseOrders) ? purchaseOrders : []).filter((order: any) => !["void", "received", "closed"].includes(String(order.status || "").toLowerCase())).length,
+        unbilledGoodsReceipts: (grni?.details?.open_receipt_lines) || (Array.isArray(goodsReceipts) ? goodsReceipts.filter((receipt: any) => String(receipt.status || "").toLowerCase() === "posted").length : 0),
+        grniExposure: toNumber(grni?.subledger_balance),
         monthlySales: monthNames
           .filter((month) => monthlySalesMap.has(month))
           .map((month) => ({ month, sales: toNumber(monthlySalesMap.get(month)) })),

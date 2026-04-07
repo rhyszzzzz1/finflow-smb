@@ -2,8 +2,11 @@
 
 function validateInventoryPayload(body) {
   const errors = [];
-  if (!body.linked_vendor_profile_id) errors.push("linked_vendor_profile_id is required");
-  if (!body.vendor_product_id) errors.push("vendor_product_id is required");
+  const hasVendorProductFlow = !!(body.linked_vendor_profile_id && body.vendor_product_id);
+  const hasStandaloneItemRef = !!(body.item_id || body.name || body.product_name);
+  if (!hasVendorProductFlow && !hasStandaloneItemRef) {
+    errors.push("Provide item_id, name/product_name, or linked_vendor_profile_id with vendor_product_id");
+  }
   if (body.purchase_price === undefined || body.purchase_price === null) errors.push("purchase_price is required");
   if (body.selling_price === undefined || body.selling_price === null) errors.push("selling_price is required");
   return errors;
@@ -38,10 +41,31 @@ function validateStockTransferPayload(body) {
   return errors;
 }
 
+function validateItemVendorLinkPayload(body) {
+  const errors = [];
+  if (!(body.vendor_id || body.linked_vendor_profile_id)) {
+    errors.push("vendor_id or linked_vendor_profile_id is required");
+  }
+  if (body.lead_time_days !== undefined && body.lead_time_days !== null && body.lead_time_days !== "") {
+    const days = Number(body.lead_time_days);
+    if (!Number.isInteger(days) || days < 0) {
+      errors.push("lead_time_days must be a non-negative integer");
+    }
+  }
+  if (body.last_purchase_price !== undefined && body.last_purchase_price !== null && body.last_purchase_price !== "") {
+    const price = Number(body.last_purchase_price);
+    if (!Number.isFinite(price) || price < 0) {
+      errors.push("last_purchase_price must be a non-negative number");
+    }
+  }
+  return errors;
+}
+
 module.exports = {
   validateInventoryPayload,
   validateItemPayload,
   validateWarehousePayload,
   validateStockAdjustmentPayload,
   validateStockTransferPayload,
+  validateItemVendorLinkPayload,
 };

@@ -1,0 +1,508 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Literature Review — FinTrac</title>
+    <style>
+      :root {
+        --ink: #0f172a;
+        --muted: #475569;
+        --title: #1e3a5f;
+        --accent: #2563eb;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        font-family: "Segoe UI", Inter, system-ui, sans-serif;
+        color: var(--ink);
+        background: #f1f5f9;
+        line-height: 1.55;
+        font-size: 11pt;
+      }
+      .sheet {
+        max-width: 210mm;
+        margin: 16px auto;
+        background: #fff;
+        padding: 14mm 18mm 18mm;
+        box-shadow: 0 2px 16px rgba(15, 23, 42, 0.08);
+      }
+      @page {
+        size: A4;
+        margin: 14mm;
+      }
+      @media print {
+        body {
+          background: #fff;
+        }
+        .sheet {
+          box-shadow: none;
+          margin: 0;
+          max-width: none;
+          padding: 0;
+        }
+        .no-print {
+          display: none !important;
+        }
+        a {
+          color: #000;
+          text-decoration: none;
+        }
+      }
+      .institutional-header {
+        position: relative;
+        width: 100%;
+        margin-bottom: 20px;
+      }
+      .institutional-header img.banner-img {
+        display: block;
+        width: 100%;
+        height: auto;
+      }
+      .banner-center-overlay {
+        position: absolute;
+        left: 26%;
+        right: 26%;
+        top: 8%;
+        bottom: 8%;
+        background: #fff;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        text-align: center;
+        padding: 8px 12px;
+        border-radius: 4px;
+        box-shadow: 0 0 0 1px rgba(15, 23, 42, 0.06);
+      }
+      .banner-center-overlay h1 {
+        margin: 0 0 6px;
+        font-size: 1.55rem;
+        font-weight: 700;
+        color: var(--title);
+        letter-spacing: -0.02em;
+      }
+      .banner-center-overlay .meta {
+        margin: 0;
+        font-size: 0.72rem;
+        line-height: 1.45;
+        color: var(--muted);
+      }
+      .banner-center-overlay .meta strong {
+        color: var(--ink);
+        font-weight: 600;
+      }
+      @media (max-width: 640px) {
+        .banner-center-overlay {
+          left: 18%;
+          right: 18%;
+          font-size: 0.85em;
+        }
+      }
+      h1.doc-title {
+        margin: 0 0 6px;
+        font-size: 1.35rem;
+        color: var(--title);
+      }
+      h2 {
+        margin: 22px 0 10px;
+        font-size: 1.05rem;
+        color: var(--accent);
+        border-bottom: 1px solid #cbd5e1;
+        padding-bottom: 4px;
+      }
+      h3 {
+        margin: 16px 0 8px;
+        font-size: 1rem;
+        color: var(--ink);
+      }
+      .subtitle {
+        font-size: 1rem;
+        font-weight: 600;
+        color: var(--muted);
+        margin: 0 0 14px;
+        line-height: 1.35;
+      }
+      .cover-meta {
+        font-size: 0.95rem;
+        color: var(--muted);
+        margin: 0 0 20px;
+      }
+      .cover-meta p {
+        margin: 4px 0;
+      }
+      ul {
+        margin: 8px 0;
+        padding-left: 1.25em;
+      }
+      li {
+        margin-bottom: 6px;
+      }
+      table.comparison {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 9.5pt;
+        margin: 12px 0;
+      }
+      table.comparison th,
+      table.comparison td {
+        border: 1px solid #cbd5e1;
+        padding: 8px 6px;
+        vertical-align: top;
+        text-align: left;
+      }
+      table.comparison th {
+        background: #f8fafc;
+        font-weight: 600;
+      }
+      .toc ul {
+        list-style: none;
+        padding-left: 0;
+      }
+      .toc li {
+        margin-bottom: 4px;
+      }
+      p {
+        margin: 0 0 10px;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="sheet">
+      <header class="institutional-header" aria-label="Institutional header">
+        <img
+          class="banner-img"
+          src="fyp-institutional-header.png"
+          alt="Herald College Kathmandu, ING, University of Wolverhampton"
+        />
+        <div class="banner-center-overlay">
+          <h1>FinTrac</h1>
+          <div class="meta">
+            <p><strong>Name:</strong> Rhys Maharjan</p>
+            <p><strong>University ID:</strong> 2408970</p>
+            <p><strong>Supervisor:</strong> Mr. Santosh Sapkota</p>
+            <p><strong>Reader:</strong> Mr. Raj Pradhan</p>
+          </div>
+        </div>
+      </header>
+
+      <h1 class="doc-title">Literature Review</h1>
+      <p class="subtitle">
+        Design and Development of a Cloud-Based Accounting and Business Management
+        System for Small and Medium-Sized Enterprises (SMEs)
+      </p>
+      <div class="cover-meta">
+        <p><strong>Submitted by:</strong> Rhys Maharjan</p>
+        <p><strong>Student ID:</strong> 2408970</p>
+        <p><strong>Supervisor:</strong> Mr. Santosh Sapkota</p>
+        <p><strong>Reader:</strong> Mr. Raj Pradhan</p>
+      </div>
+
+      <nav class="toc" aria-label="Contents">
+        <h2>Contents</h2>
+        <ul>
+          <li>1. Introduction</li>
+          <li>
+            2. Thematic / Conceptual Framework (Thematic Order)
+            <ul>
+              <li>2.1 Cloud Accounting Adoption in SMEs</li>
+              <li>2.2 Inventory and Accounting Integration</li>
+              <li>2.3 Receivables and Cash-Flow Management</li>
+              <li>2.4 Security, Privacy and Regulatory Compliance</li>
+              <li>2.5 Usability and CSV-Based Onboarding</li>
+            </ul>
+          </li>
+          <li>3. Comparative Analysis Table</li>
+          <li>4. Discussion &amp; Gap Identification</li>
+          <li>5. Conclusion</li>
+          <li>6. References (Harvard — UK Format)</li>
+        </ul>
+      </nav>
+
+      <h2>1. Introduction</h2>
+      <p>
+        Small and Medium-Sized Enterprises (SMEs) are the main source of most national
+        economies; nevertheless, they always face the challenge of effective
+        management of their finances. Typical issues are disjointed accounting
+        databases, absence of real-time financial transparency, ineffective inventory
+        management, slow receivable collections, and overdependence on Excel or manual
+        bookkeeping systems. These issues often result in cash-flow stress,
+        miscalculations of tax, and poor financial decision-making.
+      </p>
+      <p>
+        Innovations in cloud computing have made it possible to create cloud-based
+        accounting applications that are highly automated, accessible, and integrated
+        at relatively low cost. Although these advantages are real, many SMEs remain
+        reluctant to embrace such systems, citing data safety, complexity, regulatory
+        compliance, and technical insufficiency.
+      </p>
+      <p>This literature review analyses academic and industry literature critically to gain insight on:</p>
+      <ul>
+        <li>the adoption factors of cloud accounting for SMEs;</li>
+        <li>the operational value of integrating inventory with accounting systems;</li>
+        <li>the role of receivables and cash-flow management;</li>
+        <li>security and privacy concerns in cloud platforms; and</li>
+        <li>usability and spreadsheet-based data onboarding through CSV.</li>
+      </ul>
+      <p>
+        The review provides academic groundwork for the design and implementation of
+        FinTrac, the proposed cloud-based SME accounting and business management
+        system developed in this project.
+      </p>
+
+      <h2>2. Thematic / Conceptual Framework (Thematic Order)</h2>
+
+      <h3>2.1 Cloud Accounting Adoption in SMEs</h3>
+      <p>
+        Alshamaila, Papagiannidis, and Li (2013) discovered that perceived usefulness,
+        cost-efficiency, and ease of access are the main factors that spur adoption of
+        cloud accounting among SMEs. Their framework emphasizes that SMEs appreciate
+        lower infrastructure expenses and location-free access to financial data. Their
+        research, however, suffers regional limitations through a UK focus. This was
+        extended by Mujalli (2024), who demonstrated that regulatory awareness and
+        vendor trust, in conjunction with organisational readiness, significantly
+        affect adoption behaviour. Even though the study establishes the business value
+        of cloud accounting, it also indicates that SMEs with low digital maturity are
+        still hesitant adopters.
+      </p>
+      <p>
+        According to OECD (2022), cloud platforms increase the productivity and
+        transparency of SMEs considerably but emphasize that introduction remains
+        unsustainable without policy support and digital education.
+      </p>
+      <p>
+        <strong>Relevance to the project:</strong> These findings support building a
+        low-cost, easy-to-use web-based accounting prototype to reduce technological
+        and financial constraints for SMEs.
+      </p>
+
+      <h3>2.2 Inventory and Accounting Integration</h3>
+      <p>
+        According to Romney and Steinbart (2017), inventory is one of the key
+        accounting drivers affecting cost of goods sold, taxation, and profit
+        reporting. Manual inventory handling often leads to delays in reconciliation and
+        failure to present financial statements correctly.
+      </p>
+      <p>
+        Liang and Wu (2019) show empirically that automated integration of inventory
+        and accounting records is an important tool to enhance financial accuracy and
+        purchasing efficiency. Their results indicate that real-time stock information
+        improves cash utilisation and minimises stock-outs.
+      </p>
+      <p>
+        Cin7 (2022) backs these results with industry evidence that automated stock
+        valuation and real-time ledger updates enhance tax reporting and operational
+        planning.
+      </p>
+      <p>
+        <strong>Applicability in this project:</strong> These studies are directly
+        relevant to implementing inventory, sales, and accounting modules in FinTrac.
+      </p>
+
+      <h3>2.3 Receivables and Cash-Flow Management</h3>
+      <p>
+        Atradius (2023) emphasizes that delayed receivables are among the most common
+        factors contributing to liquidity failure in SMEs. The report cites poor
+        monitoring and manual handling of invoices as key causes of payment delay.
+      </p>
+      <p>
+        Rawashdeh (2023) presents empirically supported evidence that receivable
+        recovery rates and overdue balances improve in SMEs using cloud-based
+        accounting systems. The analysis does not, however, explore user-interface
+        effects on collection efficiency in depth.
+      </p>
+      <p>
+        Romney and Steinbart (2017) also state that cash-flow forecasting embedded
+        within receivables and payables data is a major improvement in short-term
+        financial planning.
+      </p>
+      <p>
+        <strong>Applicability to this project:</strong> FinTrac includes receivables
+        ageing, invoice tracking, and projected cash-flow views aligned with this
+        literature.
+      </p>
+
+      <h3>2.4 Security, Privacy and Regulatory Compliance</h3>
+      <p>
+        According to Nagahawatta (2021), security is the primary obstacle to cloud
+        adoption by SMEs. Fear of data breach, absence of legal protection, and
+        ambiguity in data ownership discourage migration to cloud platforms.
+      </p>
+      <p>
+        Chen and Zhu (2020) affirm that perceived security risk has a significant
+        negative impact on adoption intention. Their findings indicate that visible
+        security measures such as encryption, secure authentication, and privacy
+        policies have a strong positive effect on assurance.
+      </p>
+      <p>
+        Bhimani et al. (2018) argue that financial systems must treat cybersecurity as
+        a minimum feature rather than an optional extra.
+      </p>
+      <p>
+        <strong>Applicability to this project:</strong> FinTrac’s architecture applies
+        security-by-design principles (including authentication and data protection
+        appropriate to a prototype deployment).
+      </p>
+
+      <h3>2.5 Usability and CSV-Based Onboarding</h3>
+      <p>
+        According to Square (2022), usability of new accounting platforms is often low
+        and data migration is challenging, which causes SMEs to abandon new services.
+        Many SMEs still hold historical records in spreadsheets.
+      </p>
+      <p>
+        According to Cin7 (2022), structured CSV templates with validation and preview
+        reduce onboarding errors. Papa et al. (2018) note that simplified interfaces
+        and domain-specific language can greatly enhance ease of use among
+        non-technical users.
+      </p>
+      <p>
+        <strong>Applicability to this project:</strong> FinTrac supports CSV-style data
+        exchange, validation workflows, and simplified dashboards where applicable.
+      </p>
+
+      <h2>3. Comparative Analysis Table</h2>
+      <table class="comparison">
+        <thead>
+          <tr>
+            <th>Author &amp; Year</th>
+            <th>Study Title / Focus</th>
+            <th>Methodology</th>
+            <th>Key Findings</th>
+            <th>Limitations</th>
+            <th>Relevance</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Alshamaila et al. (2013)</td>
+            <td>Cloud adoption in SMEs</td>
+            <td>Survey</td>
+            <td>Cost and usefulness drive adoption</td>
+            <td>Region-specific</td>
+            <td>Supports cloud approach</td>
+          </tr>
+          <tr>
+            <td>Mujalli (2024)</td>
+            <td>Cloud accounting adoption</td>
+            <td>Quantitative study</td>
+            <td>Readiness and trust critical</td>
+            <td>Limited behavioural analysis</td>
+            <td>Adoption factors</td>
+          </tr>
+          <tr>
+            <td>Liang &amp; Wu (2019)</td>
+            <td>Inventory–accounting integration</td>
+            <td>Empirical modelling</td>
+            <td>Improves cost accuracy</td>
+            <td>Manufacturing focus</td>
+            <td>Inventory design</td>
+          </tr>
+          <tr>
+            <td>Rawashdeh (2023)</td>
+            <td>Cloud accounting performance</td>
+            <td>Survey</td>
+            <td>Improves cash-flow</td>
+            <td>No UI study</td>
+            <td>Receivables dashboard</td>
+          </tr>
+          <tr>
+            <td>Nagahawatta (2021)</td>
+            <td>Cloud security in SMEs</td>
+            <td>Literature review</td>
+            <td>Security main adoption barrier</td>
+            <td>No empirical validation</td>
+            <td>System security</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <h2>4. Discussion &amp; Gap Identification</h2>
+      <p>
+        The literature shows that cloud accounting can materially enhance financial
+        accuracy, efficiency, and cash-flow visibility for SMEs. Nevertheless, usability
+        requirements of low-tech SMEs in developing economies are not fully served by
+        many commercial systems. Moreover, relatively few solutions combine
+        receivables, inventory, and cash-flow in a single decision-oriented dashboard
+        suited to small businesses. Applied research assessing how simple security
+        design elements affect SME trust remains limited. These gaps motivate a
+        lightweight, integrated prototype such as FinTrac.
+      </p>
+
+      <h2>5. Conclusion</h2>
+      <p>
+        This literature review has shown that cloud-based accounting and integrated
+        business management systems can benefit SMEs significantly in terms of
+        financial visibility, stock control, and receivables recovery. Adoption is still
+        constrained by usability difficulties, security concerns, and digital skills
+        gaps. FinTrac is positioned to address these limitations through a secure,
+        simplified, CSV-aware accounting prototype tailored to SME needs.
+      </p>
+
+      <h2>6. References (Harvard — UK Format)</h2>
+      <ul>
+        <li>
+          Alshamaila, Y., Papagiannidis, S. and Li, F. (2013) ‘Cloud computing adoption
+          by SMEs in the North East of England’, <em>Journal of Enterprise Information
+          Management</em>, 26(3), pp. 250–275.
+        </li>
+        <li>
+          Atradius (2023) <em>SME Receivables and Cash-Flow Risk Report</em>. Amsterdam:
+          Atradius NV.
+        </li>
+        <li>
+          Bhimani, A., Gosselin, M., Ncube, M. and Okano, H. (2018)
+          <em>Digital data and management accounting</em>. Oxford: Oxford University
+          Press.
+        </li>
+        <li>
+          Chen, J. and Zhu, Z. (2020) ‘Cloud security risk perception and SME adoption
+          behaviour’, <em>Computers &amp; Security</em>, 97, pp. 1–12.
+        </li>
+        <li>
+          Cin7 (2022) <em>Inventory and accounting integration for SMEs</em>.
+          Wellington: Cin7 Ltd.
+        </li>
+        <li>
+          Liang, T. and Wu, Y. (2019) ‘Inventory-accounting integration and firm
+          performance’, <em>Decision Support Systems</em>, 122, pp. 1–12.
+        </li>
+        <li>
+          Mujalli, A. (2024) ‘Adoption of cloud-based accounting in SMEs’,
+          <em>Technology in Society</em>, 76, pp. 1–15.
+        </li>
+        <li>
+          Nagahawatta, R. (2021) ‘Security concerns in cloud computing for SMEs’,
+          <em>Journal of Information Security and Applications</em>, 58, pp. 1–10.
+        </li>
+        <li>OECD (2022) <em>The digital transformation of SMEs</em>. Paris: OECD Publishing.</li>
+        <li>
+          Papa, A., Santoro, G., Tirabeni, L. and Monge, F. (2018) ‘Digital
+          transformation and SME performance’, <em>Journal of Business Research</em>, 92,
+          pp. 469–477.
+        </li>
+        <li>
+          Rawashdeh, A. (2023) ‘Impact of cloud accounting on organisational
+          performance’, <em>International Journal of Data and Network Science</em>, 7(2),
+          pp. 689–700.
+        </li>
+        <li>
+          Romney, M.B. and Steinbart, P.J. (2017) <em>Accounting information systems</em>.
+          14th edn. Harlow: Pearson.
+        </li>
+        <li>
+          Square (2022) <em>Inventory management guide for small businesses</em>. San
+          Francisco: Square Inc.
+        </li>
+      </ul>
+
+      <p class="no-print" style="margin-top: 24px; font-size: 10pt; color: var(--muted)">
+        Open this file in a browser and use Print → Save as PDF for submission. Adjust
+        the banner overlay position in CSS if it does not align with your PDF viewer’s
+        scaling.
+      </p>
+    </div>
+  </body>
+</html>

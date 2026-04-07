@@ -10,8 +10,7 @@ import { Label } from "@/components/ui/label";
 import { Shield, LogOut, Eye, CheckCircle, XCircle, Download, FileText, Image } from "lucide-react";
 import { toast } from "sonner";
 import { format } from "date-fns";
-
-const API_BASE = "http://localhost:5001";
+import { apiUrl } from "@/config/apiOrigin";
 
 interface KYCUser {
   id: string;
@@ -70,7 +69,7 @@ export const AdminDashboard = () => {
       }
 
       try {
-        const res = await fetch(`${API_BASE}/api/admin/verify`, {
+        const res = await fetch(apiUrl("/api/admin/verify"), {
           headers: { Authorization: `Bearer ${token}` },
         });
         if (!res.ok) {
@@ -94,7 +93,7 @@ export const AdminDashboard = () => {
     setIsLoading(true);
     try {
       const params = filterStatus !== "all" ? `?status=${filterStatus}` : "";
-      const res = await adminFetch(`${API_BASE}/api/admin/kyc/users${params}`);
+      const res = await adminFetch(apiUrl(`/api/admin/kyc/users${params}`));
       const data = await res.json();
       if (!res.ok) {
         toast.error("Failed to load users");
@@ -113,7 +112,7 @@ export const AdminDashboard = () => {
   }, [fetchUsers]);
 
   const fetchUserDocuments = async (userId: string) => {
-    const res = await adminFetch(`${API_BASE}/api/admin/kyc/documents/${userId}`);
+    const res = await adminFetch(apiUrl(`/api/admin/kyc/documents/${userId}`));
     const data = await res.json();
     if (!res.ok) {
       toast.error("Failed to load documents");
@@ -134,7 +133,7 @@ export const AdminDashboard = () => {
 
     setIsProcessing(true);
     try {
-      const res = await adminFetch(`${API_BASE}/api/admin/kyc/approve/${selectedUser.id}`, {
+      const res = await adminFetch(apiUrl(`/api/admin/kyc/approve/${selectedUser.id}`), {
         method: "PUT",
       });
       if (!res.ok) throw new Error("Failed to approve");
@@ -154,7 +153,7 @@ export const AdminDashboard = () => {
 
     setIsProcessing(true);
     try {
-      const res = await adminFetch(`${API_BASE}/api/admin/kyc/reject/${selectedUser.id}`, {
+      const res = await adminFetch(apiUrl(`/api/admin/kyc/reject/${selectedUser.id}`), {
         method: "PUT",
         body: JSON.stringify({
           rejectionReason: rejectionReason || "Documents did not meet verification requirements",
@@ -173,9 +172,8 @@ export const AdminDashboard = () => {
   };
 
   const handleViewDocument = (doc: KYCDocument) => {
-    // Documents are served from the backend /uploads directory
-    const url = `${API_BASE}${doc.file_path}`;
-    window.open(url, "_blank");
+    const path = doc.file_path?.startsWith("/") ? doc.file_path : `/${doc.file_path || ""}`;
+    window.open(apiUrl(path), "_blank");
   };
 
   const handleLogout = () => {

@@ -1,5 +1,10 @@
 "use strict";
 
+// TODO(accounting-refactor): this is a legacy compatibility service over
+// `invoices` and `purchases`. Its name-based fields remain only to support
+// transitional callers. Authoritative settlement logic now lives in
+// `SettlementService`, which uses canonical document and counterparty IDs.
+
 function isPositiveNumber(value) {
   const n = Number(value);
   return Number.isFinite(n) && n > 0;
@@ -90,6 +95,8 @@ class PaymentAllocationService {
   }
 
   async getInvoiceOutstanding(companyId, invoiceId) {
+    // TODO(accounting-refactor): legacy invoices only expose `client_name`, so
+    // this result is inherently legacy-derived until the old invoice table is retired.
     const rows = await this.q(
       `SELECT
           i.id,
@@ -115,6 +122,8 @@ class PaymentAllocationService {
   }
 
   async getPurchaseOutstanding(companyId, purchaseId) {
+    // TODO(accounting-refactor): legacy purchases only expose `vendor_name`, so
+    // this result is inherently legacy-derived until the old purchase table is retired.
     const rows = await this.q(
       `SELECT
           pu.id,

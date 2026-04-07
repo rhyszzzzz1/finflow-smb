@@ -23,22 +23,39 @@ async function main() {
   try {
     const service = new ChartOfAccountsService(pool);
 
-    const [companyRows] = companyId
-      ? await pool.execute(`SELECT id, legal_name FROM companies WHERE id = ?`, [companyId])
-      : await pool.execute(`SELECT id, legal_name FROM companies ORDER BY legal_name ASC`);
+    let targets = [];
 
-    if (!companyRows.length) {
+    if (companyId) {
+      targets = [{ id: companyId, legal_name: companyId }];
+    } else {
+      try {
+        const [rows] = await pool.execute(`SELECT id, legal_name FROM companies ORDER BY legal_name ASC`);
+        targets = rows;
+      } catch (e) {
+        if (e.code !== "ER_NO_SUCH_TABLE") throw e;
+        console.warn("[COA_SEED] Table companies not found — falling back to profile-scoped company ids.");
+      }
+
+      if (!targets.length) {
+        const [profiles] = await pool.execute(
+          `SELECT id, COALESCE(business_name, name, email) AS label FROM profiles ORDER BY email ASC`
+        );
+        targets = profiles.map((p) => ({ id: p.id, legal_name: p.label || p.id }));
+      }
+    }
+
+    if (!targets.length) {
       throw new Error(
         companyId
-          ? `Company not found: ${companyId}`
-          : "No companies found. Create or backfill companies before seeding chart_of_accounts."
+          ? `No seed target for company id: ${companyId}`
+          : "No companies or profiles found. Sign up at least one user before seeding chart_of_accounts."
       );
     }
 
-    for (const company of companyRows) {
-      const result = await service.seedDefaultAccountsForCompany(company.id);
+    for (const row of targets) {
+      const result = await service.seedDefaultAccountsForCompany(row.id);
       console.log(
-        `[COA_SEEDED] company=${company.legal_name || company.id} codes=${result.seededAccountCodes.length}`
+        `[COA_SEEDED] scope=${row.legal_name || row.id} id=${row.id} codes=${result.seededAccountCodes.length}`
       );
     }
   } finally {

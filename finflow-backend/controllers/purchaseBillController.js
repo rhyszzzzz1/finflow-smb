@@ -33,6 +33,21 @@ class PurchaseBillController {
     return res.json(bill);
   };
 
+  submitForApproval = async (req, res) => {
+    const bill = await this.purchaseBillService.submitForApproval(req.user.id, req.params.id, req.body || {}, req.requestMeta || {});
+    return res.json(bill);
+  };
+
+  reject = async (req, res) => {
+    const bill = await this.purchaseBillService.reject(req.user.id, req.params.id, req.body || {}, req.requestMeta || {});
+    return res.json(bill);
+  };
+
+  resubmit = async (req, res) => {
+    const bill = await this.purchaseBillService.resubmit(req.user.id, req.params.id, req.body || {}, req.requestMeta || {});
+    return res.json(bill);
+  };
+
   post = async (req, res) => {
     const bill = await this.purchaseBillService.post(req.user.id, req.params.id, req.requestMeta || {});
     return res.json(bill);

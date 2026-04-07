@@ -1,12 +1,32 @@
 const API_BASE = "/api";
+const API_TIMEOUT_MS = 8000;
 
 const getToken = () => localStorage.getItem("auth_token");
 const isDevelopment = import.meta.env.DEV;
+
+type QueryParams = Record<string, string | number | boolean | null | undefined>;
 
 const deprecatedWrite = (methodName: string, replacement: string): never => {
   const message = `Deprecated frontend API write: ${methodName}. Use ${replacement} instead.`;
   console.warn(message);
   throw new Error(message);
+};
+
+const deprecatedRead = (methodName: string, replacement: string) => {
+  if (isDevelopment) {
+    console.warn(`Deprecated frontend API read: ${methodName}. Use ${replacement} instead.`);
+  }
+};
+
+const buildQuery = (params?: QueryParams) => {
+  const query = new URLSearchParams();
+  Object.entries(params || {}).forEach(([key, value]) => {
+    if (value !== undefined && value !== null && value !== "") {
+      query.set(key, String(value));
+    }
+  });
+  const queryString = query.toString();
+  return queryString ? `?${queryString}` : "";
 };
 
 const apiRequest = async (endpoint: string, options: RequestInit = {}) => {
@@ -20,82 +40,143 @@ const apiRequest = async (endpoint: string, options: RequestInit = {}) => {
     headers.Authorization = `Bearer ${token}`;
   }
 
-  const response = await fetch(`${API_BASE}${endpoint}`, {
-    ...options,
-    headers,
+  const controller = new AbortController();
+  const timeoutId = window.setTimeout(() => controller.abort(), API_TIMEOUT_MS);
+
+  try {
+    const response = await fetch(`${API_BASE}${endpoint}`, {
+      ...options,
+      headers,
+      signal: options.signal || controller.signal,
+    });
+
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      throw new Error(data.message || "An error occurred");
+    }
+
+    return data;
+  } catch (error: any) {
+    if (error?.name === "AbortError") {
+      throw new Error("Request timed out while loading data");
+    }
+    throw error;
+  } finally {
+    window.clearTimeout(timeoutId);
+  }
+};
+
+const post = (endpoint: string, body?: any) =>
+  apiRequest(endpoint, {
+    method: "POST",
+    ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
   });
 
-  const data = await response.json().catch(() => ({}));
-  if (!response.ok) {
-    throw new Error(data.message || "An error occurred");
-  }
+const put = (endpoint: string, body?: any) =>
+  apiRequest(endpoint, {
+    method: "PUT",
+    ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
+  });
 
-  return data;
-};
+const remove = (endpoint: string) =>
+  apiRequest(endpoint, {
+    method: "DELETE",
+  });
+
+const withAccountingPath = (path: string) => `/accounting${path}`;
+
+const createDocumentApi = (basePath: string) => ({
+  list: async () => apiRequest(withAccountingPath(basePath)),
+  getById: async (id: string) => apiRequest(withAccountingPath(`${basePath}/${id}`)),
+  createDraft: async (payload: any) => post(withAccountingPath(basePath), payload),
+  updateDraft: async (id: string, payload: any) => put(withAccountingPath(`${basePath}/${id}`), payload),
+  approve: async (id: string) => post(withAccountingPath(`${basePath}/${id}/approve`)),
+  post: async (id: string) => post(withAccountingPath(`${basePath}/${id}/post`)),
+  void: async (id: string) => post(withAccountingPath(`${basePath}/${id}/void`)),
+});
 
 // AUTHORITATIVE: accounting source of truth
 export const accountingInvoiceApi = {
-  list: async () => apiRequest("/accounting/sales-invoices"),
-  getById: async (id: string) => apiRequest(`/accounting/sales-invoices/${id}`),
-  createDraft: async (invoice: any) =>
-    apiRequest("/accounting/sales-invoices", {
-      method: "POST",
-      body: JSON.stringify(invoice),
-    }),
-  updateDraft: async (id: string, invoice: any) =>
-    apiRequest(`/accounting/sales-invoices/${id}`, {
-      method: "PUT",
-      body: JSON.stringify(invoice),
-    }),
-  approve: async (id: string) =>
-    apiRequest(`/accounting/sales-invoices/${id}/approve`, {
-      method: "POST",
-    }),
-  post: async (id: string) =>
-    apiRequest(`/accounting/sales-invoices/${id}/post`, {
-      method: "POST",
-    }),
-  void: async (id: string) =>
-    apiRequest(`/accounting/sales-invoices/${id}/void`, {
-      method: "POST",
-    }),
+  ...createDocumentApi("/sales-invoices"),
+  submit: async (id: string, payload?: any) => post(withAccountingPath(`/sales-invoices/${id}/submit`), payload || {}),
+  reject: async (id: string, payload: any) => post(withAccountingPath(`/sales-invoices/${id}/reject`), payload),
+  resubmit: async (id: string, payload?: any) => post(withAccountingPath(`/sales-invoices/${id}/resubmit`), payload || {}),
 };
 
-// AUTHORITATIVE: accounting source of truth
+// AUTHORITATIVE: sales workflow
+export const salesQuoteApi = {
+  list: async () => apiRequest(withAccountingPath("/sales-quotes")),
+  getById: async (id: string) => apiRequest(withAccountingPath(`/sales-quotes/${id}`)),
+  createDraft: async (payload: any) => post(withAccountingPath("/sales-quotes"), payload),
+  send: async (id: string) => post(withAccountingPath(`/sales-quotes/${id}/send`)),
+  accept: async (id: string) => post(withAccountingPath(`/sales-quotes/${id}/accept`)),
+  convertToOrder: async (id: string, payload?: any) => post(withAccountingPath(`/sales-quotes/${id}/convert-to-order`), payload || {}),
+  void: async (id: string) => post(withAccountingPath(`/sales-quotes/${id}/void`)),
+};
+
+// AUTHORITATIVE: sales workflow
+export const salesOrderApi = {
+  list: async () => apiRequest(withAccountingPath("/sales-orders")),
+  getById: async (id: string) => apiRequest(withAccountingPath(`/sales-orders/${id}`)),
+  createDraft: async (payload: any) => post(withAccountingPath("/sales-orders"), payload),
+  accept: async (id: string) => post(withAccountingPath(`/sales-orders/${id}/accept`)),
+  convertToInvoice: async (id: string, payload?: any) => post(withAccountingPath(`/sales-orders/${id}/convert-to-invoice`), payload || {}),
+  void: async (id: string) => post(withAccountingPath(`/sales-orders/${id}/void`)),
+};
+
+// AUTHORITATIVE: purchasing source of truth
 export const purchaseBillApi = {
-  list: async () => apiRequest("/accounting/purchase-bills"),
-  getById: async (id: string) => apiRequest(`/accounting/purchase-bills/${id}`),
-  createDraft: async (bill: any) =>
-    apiRequest("/accounting/purchase-bills", {
-      method: "POST",
-      body: JSON.stringify(bill),
-    }),
-  updateDraft: async (id: string, bill: any) =>
-    apiRequest(`/accounting/purchase-bills/${id}`, {
-      method: "PUT",
-      body: JSON.stringify(bill),
-    }),
-  approve: async (id: string) =>
-    apiRequest(`/accounting/purchase-bills/${id}/approve`, {
-      method: "POST",
-    }),
-  post: async (id: string) =>
-    apiRequest(`/accounting/purchase-bills/${id}/post`, {
-      method: "POST",
-    }),
-  void: async (id: string) =>
-    apiRequest(`/accounting/purchase-bills/${id}/void`, {
-      method: "POST",
-    }),
+  ...createDocumentApi("/purchase-bills"),
+  submit: async (id: string, payload?: any) => post(withAccountingPath(`/purchase-bills/${id}/submit`), payload || {}),
+  reject: async (id: string, payload: any) => post(withAccountingPath(`/purchase-bills/${id}/reject`), payload),
+  resubmit: async (id: string, payload?: any) => post(withAccountingPath(`/purchase-bills/${id}/resubmit`), payload || {}),
+};
+
+// AUTHORITATIVE: procurement workflow
+export const purchaseOrderApi = {
+  list: async () => apiRequest(withAccountingPath("/purchase-orders")),
+  getById: async (id: string) => apiRequest(withAccountingPath(`/purchase-orders/${id}`)),
+  createDraft: async (payload: any) => post(withAccountingPath("/purchase-orders"), payload),
+  updateDraft: async (id: string, payload: any) => put(withAccountingPath(`/purchase-orders/${id}`), payload),
+  approve: async (id: string) => post(withAccountingPath(`/purchase-orders/${id}/approve`)),
+  void: async (id: string) => post(withAccountingPath(`/purchase-orders/${id}/void`)),
+};
+
+// AUTHORITATIVE: procurement workflow
+export const goodsReceiptApi = {
+  list: async () => apiRequest(withAccountingPath("/goods-receipts")),
+  getById: async (id: string) => apiRequest(withAccountingPath(`/goods-receipts/${id}`)),
+  createDraft: async (payload: any) => post(withAccountingPath("/goods-receipts"), payload),
+  updateDraft: async (id: string, payload: any) => put(withAccountingPath(`/goods-receipts/${id}`), payload),
+  post: async (id: string) => post(withAccountingPath(`/goods-receipts/${id}/post`)),
+  void: async (id: string) => post(withAccountingPath(`/goods-receipts/${id}/void`)),
+};
+
+// AUTHORITATIVE: returns/adjustments
+export const salesCreditNoteApi = {
+  ...createDocumentApi("/sales-credit-notes"),
+};
+
+// AUTHORITATIVE: returns/adjustments
+export const purchaseDebitNoteApi = {
+  ...createDocumentApi("/purchase-debit-notes"),
+};
+
+// AUTHORITATIVE: bilateral relationship model
+export const businessRelationshipApi = {
+  list: async (params?: { status?: string; onlyActive?: boolean }) =>
+    apiRequest(`/business-relationships${buildQuery({
+      status: params?.status,
+      only_active: params?.onlyActive,
+    })}`),
+  listActive: async () => apiRequest("/business-relationships/active"),
+  invite: async (payload: any) => post("/business-relationships/invite", payload),
+  accept: async (id: string) => post(`/business-relationships/${id}/accept`),
 };
 
 // AUTHORITATIVE: settlement source of truth
 export const paymentApi = {
-  apply: async (payment: any) =>
-    apiRequest("/payments/apply", {
-      method: "POST",
-      body: JSON.stringify(payment),
-    }),
+  apply: async (payment: any) => post("/payments/apply", payment),
   listBankAccounts: async () => apiRequest("/bank-accounts"),
   getInvoiceOutstanding: async (id: string) => apiRequest(`/outstanding/invoices/${id}`),
   getPurchaseOutstanding: async (id: string) => apiRequest(`/outstanding/purchases/${id}`),
@@ -117,159 +198,100 @@ export const payablesReadApi = {
 
 // AUTHORITATIVE: inventory source of truth
 export const inventoryApi = {
+  // DEPRECATED COMPATIBILITY: legacy inventory-shaped list for older UI parity.
   getAll: async () => apiRequest("/inventory"),
   getVendorProducts: async (linkedProfileId: string) => apiRequest(`/vendors/${linkedProfileId}/products`),
   getStockBalances: async () => apiRequest("/stock/balances"),
-  createStockAdjustment: async (payload: any) =>
-    apiRequest("/stock/adjustment", {
-      method: "POST",
-      body: JSON.stringify(payload),
-    }),
-  createStockTransfer: async (payload: any) =>
-    apiRequest("/stock/transfer", {
-      method: "POST",
-      body: JSON.stringify(payload),
-    }),
+  createStockAdjustment: async (payload: any) => post("/stock/adjustment", payload),
+  createStockTransfer: async (payload: any) => post("/stock/transfer", payload),
   getItems: async () => apiRequest("/items"),
-  createItem: async (payload: any) =>
-    apiRequest("/items", {
-      method: "POST",
-      body: JSON.stringify(payload),
-    }),
+  createItem: async (payload: any) => post("/items", payload),
   getWarehouses: async () => apiRequest("/warehouses"),
-  createWarehouse: async (payload: any) =>
-    apiRequest("/warehouses", {
-      method: "POST",
-      body: JSON.stringify(payload),
-    }),
-  add: async (product: any) =>
-    apiRequest("/inventory", {
-      method: "POST",
-      body: JSON.stringify(product),
-    }),
-  update: async (id: string, product: any) =>
-    apiRequest(`/inventory/${id}`, {
-      method: "PUT",
-      body: JSON.stringify(product),
-    }),
-  delete: async (id: string) =>
-    apiRequest(`/inventory/${id}`, {
-      method: "DELETE",
-    }),
+  createWarehouse: async (payload: any) => post("/warehouses", payload),
+  listItemVendorLinks: async (itemId: string) => apiRequest(`/items/${itemId}/vendors`),
+  addItemVendorLink: async (itemId: string, payload: any) => post(`/items/${itemId}/vendors`, payload),
+  markPreferredVendor: async (itemId: string, linkId: string) => post(`/items/${itemId}/vendors/${linkId}/preferred`),
+  // Transitional compatibility only:
+  add: async (product: any) => post("/inventory", product),
+  update: async (id: string, product: any) => put(`/inventory/${id}`, product),
+  delete: async (id: string) => remove(`/inventory/${id}`),
 };
 
 export const vendorProductsApi = {
   getMine: async () => apiRequest("/vendor-products/mine"),
-  add: async (product: any) =>
-    apiRequest("/vendor-products", {
-      method: "POST",
-      body: JSON.stringify(product),
-    }),
-  update: async (id: string, product: any) =>
-    apiRequest(`/vendor-products/${id}`, {
-      method: "PUT",
-      body: JSON.stringify(product),
-    }),
-  delete: async (id: string) =>
-    apiRequest(`/vendor-products/${id}`, {
-      method: "DELETE",
-    }),
+  add: async (product: any) => post("/vendor-products", product),
+  update: async (id: string, product: any) => put(`/vendor-products/${id}`, product),
+  delete: async (id: string) => remove(`/vendor-products/${id}`),
 };
 
 export const settingsApi = {
   get: async () => apiRequest("/settings"),
-  save: async (settings: any) =>
-    apiRequest("/settings", {
-      method: "POST",
-      body: JSON.stringify(settings),
-    }),
+  save: async (settings: any) => post("/settings", settings),
 };
 
-// DEPRECATED: use accountingReportsApi + accountingInvoiceApi derived hooks instead
+// DEPRECATED: use accountingReportsApi + workflow hooks instead
 export const dashboardApi = {
-  getStats: async () => deprecatedWrite("dashboardApi.getStats", "useDashboardStats with accounting reports"),
+  getStats: async () => deprecatedWrite("dashboardApi.getStats", "useDashboardStats with workflow-aware accounting reports"),
 };
 
+// Transitional relationship/contact compatibility layer
 export const clientsApi = {
   getRegisteredAccounts: async () => apiRequest("/accounts/registered"),
   getSalesClients: async () => apiRequest("/clients/sales"),
   getVendors: async () => apiRequest("/clients/vendors"),
   getClientList: async () => apiRequest("/clients/list"),
   getVendorList: async () => apiRequest("/vendors/list"),
-  addClient: async (client: any) =>
-    apiRequest("/clients", {
-      method: "POST",
-      body: JSON.stringify(client),
-    }),
-  addVendor: async (vendor: any) =>
-    apiRequest("/vendors", {
-      method: "POST",
-      body: JSON.stringify(vendor),
-    }),
-  deleteClient: async (id: string) => apiRequest(`/clients/${id}`, { method: "DELETE" }),
-  deleteVendor: async (id: string) => apiRequest(`/vendors/${id}`, { method: "DELETE" }),
+  addClient: async (client: any) => post("/clients", client),
+  addVendor: async (vendor: any) => post("/vendors", vendor),
+  deleteClient: async (id: string) => remove(`/clients/${id}`),
+  deleteVendor: async (id: string) => remove(`/vendors/${id}`),
 };
 
 // AUTHORITATIVE: accounting reports
 export const accountingReportsApi = {
-  getTrialBalance: async (params?: { startDate?: string; endDate?: string }) => {
-    const query = new URLSearchParams();
-    if (params?.startDate) query.set("start_date", params.startDate);
-    if (params?.endDate) query.set("end_date", params.endDate);
-    return apiRequest(`/reports/trial-balance${query.toString() ? `?${query.toString()}` : ""}`);
-  },
-  getProfitLoss: async (params?: { startDate?: string; endDate?: string }) => {
-    const query = new URLSearchParams();
-    if (params?.startDate) query.set("start_date", params.startDate);
-    if (params?.endDate) query.set("end_date", params.endDate);
-    return apiRequest(`/reports/profit-loss${query.toString() ? `?${query.toString()}` : ""}`);
-  },
-  getBalanceSheet: async (params?: { asOfDate?: string }) => {
-    const query = new URLSearchParams();
-    if (params?.asOfDate) query.set("as_of_date", params.asOfDate);
-    return apiRequest(`/reports/balance-sheet${query.toString() ? `?${query.toString()}` : ""}`);
-  },
-  getARAging: async (params?: { asOfDate?: string }) => {
-    const query = new URLSearchParams();
-    if (params?.asOfDate) query.set("as_of_date", params.asOfDate);
-    return apiRequest(`/reports/ar-aging${query.toString() ? `?${query.toString()}` : ""}`);
-  },
-  getAPAging: async (params?: { asOfDate?: string }) => {
-    const query = new URLSearchParams();
-    if (params?.asOfDate) query.set("as_of_date", params.asOfDate);
-    return apiRequest(`/reports/ap-aging${query.toString() ? `?${query.toString()}` : ""}`);
-  },
-  getCustomerStatement: async (customerId: string, params?: { startDate?: string; endDate?: string }) => {
-    const query = new URLSearchParams();
-    if (params?.startDate) query.set("start_date", params.startDate);
-    if (params?.endDate) query.set("end_date", params.endDate);
-    return apiRequest(`/reports/customers/${customerId}/statement${query.toString() ? `?${query.toString()}` : ""}`);
-  },
-  getVendorStatement: async (vendorId: string, params?: { startDate?: string; endDate?: string }) => {
-    const query = new URLSearchParams();
-    if (params?.startDate) query.set("start_date", params.startDate);
-    if (params?.endDate) query.set("end_date", params.endDate);
-    return apiRequest(`/reports/vendors/${vendorId}/statement${query.toString() ? `?${query.toString()}` : ""}`);
-  },
-  getStockSummary: async (params?: { asOfDate?: string }) => {
-    const query = new URLSearchParams();
-    if (params?.asOfDate) query.set("as_of_date", params.asOfDate);
-    return apiRequest(`/reports/stock-summary${query.toString() ? `?${query.toString()}` : ""}`);
-  },
-  getStockLedger: async (itemId: string, params?: { warehouseId?: string; startDate?: string; endDate?: string }) => {
-    const query = new URLSearchParams();
-    if (params?.warehouseId) query.set("warehouse_id", params.warehouseId);
-    if (params?.startDate) query.set("start_date", params.startDate);
-    if (params?.endDate) query.set("end_date", params.endDate);
-    return apiRequest(`/reports/stock-ledger/${itemId}${query.toString() ? `?${query.toString()}` : ""}`);
-  },
+  getTrialBalance: async (params?: { startDate?: string; endDate?: string }) =>
+    apiRequest(`/reports/trial-balance${buildQuery({ start_date: params?.startDate, end_date: params?.endDate })}`),
+  getProfitLoss: async (params?: { startDate?: string; endDate?: string }) =>
+    apiRequest(`/reports/profit-loss${buildQuery({ start_date: params?.startDate, end_date: params?.endDate })}`),
+  getBalanceSheet: async (params?: { asOfDate?: string }) =>
+    apiRequest(`/reports/balance-sheet${buildQuery({ as_of_date: params?.asOfDate })}`),
+  getARAging: async (params?: { asOfDate?: string }) =>
+    apiRequest(`/reports/ar-aging${buildQuery({ as_of_date: params?.asOfDate })}`),
+  getAPAging: async (params?: { asOfDate?: string }) =>
+    apiRequest(`/reports/ap-aging${buildQuery({ as_of_date: params?.asOfDate })}`),
+  getCustomerStatement: async (customerId: string, params?: { startDate?: string; endDate?: string }) =>
+    apiRequest(`/reports/customers/${customerId}/statement${buildQuery({ start_date: params?.startDate, end_date: params?.endDate })}`),
+  getVendorStatement: async (vendorId: string, params?: { startDate?: string; endDate?: string }) =>
+    apiRequest(`/reports/vendors/${vendorId}/statement${buildQuery({ start_date: params?.startDate, end_date: params?.endDate })}`),
+  getStockSummary: async (params?: { asOfDate?: string }) =>
+    apiRequest(`/reports/stock-summary${buildQuery({ as_of_date: params?.asOfDate })}`),
+  getStockLedger: async (itemId: string, params?: { warehouseId?: string; startDate?: string; endDate?: string }) =>
+    apiRequest(`/reports/stock-ledger/${itemId}${buildQuery({
+      warehouse_id: params?.warehouseId,
+      start_date: params?.startDate,
+      end_date: params?.endDate,
+    })}`),
+  getARControlReconciliation: async (params?: { asOfDate?: string }) =>
+    apiRequest(`/reports/reconciliations/ar-control${buildQuery({ as_of_date: params?.asOfDate })}`),
+  getAPControlReconciliation: async (params?: { asOfDate?: string }) =>
+    apiRequest(`/reports/reconciliations/ap-control${buildQuery({ as_of_date: params?.asOfDate })}`),
+  getInventoryControlReconciliation: async (params?: { asOfDate?: string }) =>
+    apiRequest(`/reports/reconciliations/inventory-control${buildQuery({ as_of_date: params?.asOfDate })}`),
+  getTaxControlReconciliation: async (params?: { asOfDate?: string }) =>
+    apiRequest(`/reports/reconciliations/tax-control${buildQuery({ as_of_date: params?.asOfDate })}`),
+  getAdvancesReconciliation: async (params?: { asOfDate?: string }) =>
+    apiRequest(`/reports/reconciliations/advances${buildQuery({ as_of_date: params?.asOfDate })}`),
+  getGRNIControlReconciliation: async (params?: { asOfDate?: string }) =>
+    apiRequest(`/reports/reconciliations/grni-control${buildQuery({ as_of_date: params?.asOfDate })}`),
+  getReconciliationSummary: async (params?: { asOfDate?: string }) =>
+    apiRequest(`/reports/reconciliations/summary${buildQuery({ as_of_date: params?.asOfDate })}`),
 };
 
 // DEPRECATED: temporary compatibility only
 export const invoiceApi = {
   getAll: async () => accountingInvoiceApi.list(),
   add: async () => deprecatedWrite("invoiceApi.add", "accountingInvoiceApi.createDraft"),
-  update: async () => deprecatedWrite("invoiceApi.update", "accountingInvoiceApi.updateDraft / approve / post / void"),
+  update: async () => deprecatedWrite("invoiceApi.update", "accountingInvoiceApi.updateDraft / submit / approve / post / void"),
   delete: async () => deprecatedWrite("invoiceApi.delete", "accountingInvoiceApi.void"),
 };
 
@@ -306,24 +328,16 @@ export const purchasesApi = {
 // DEPRECATED: use accountingReportsApi directly
 export const reportsApi = {
   get: async () => {
-    if (isDevelopment) {
-      console.warn("Deprecated frontend API read: reportsApi.get. Use accountingReportsApi instead.");
-    }
+    deprecatedRead("reportsApi.get", "accountingReportsApi.*");
     throw new Error("reportsApi.get is deprecated. Use accountingReportsApi report-specific methods instead.");
   },
 };
 
 export const authApi = {
   register: async (name: string, email: string, password: string) =>
-    apiRequest("/register", {
-      method: "POST",
-      body: JSON.stringify({ name, email, password }),
-    }),
+    post("/register", { name, email, password }),
   login: async (email: string, password: string) =>
-    apiRequest("/login", {
-      method: "POST",
-      body: JSON.stringify({ email, password }),
-    }),
+    post("/login", { email, password }),
 };
 
 export const kycApi = {

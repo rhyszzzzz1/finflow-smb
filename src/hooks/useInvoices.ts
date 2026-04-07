@@ -31,6 +31,10 @@ export interface Invoice {
   invoice_date: string;
   status: string;
   base_status: string;
+  approval?: {
+    status?: string;
+    required?: boolean;
+  };
   lines: InvoiceLine[];
   payment?: {
     allocated_amount?: number;
@@ -136,6 +140,42 @@ export const useInvoices = () => {
     }
   };
 
+  const submitInvoice = async (id: string, payload?: { comment?: string }) => {
+    try {
+      await accountingInvoiceApi.submit(id, payload || {});
+      toast.success("Invoice submitted for approval");
+      await fetchInvoices();
+      return true;
+    } catch (error: any) {
+      toast.error(error.message || "Failed to submit invoice");
+      return false;
+    }
+  };
+
+  const rejectInvoice = async (id: string, payload: { comment: string }) => {
+    try {
+      await accountingInvoiceApi.reject(id, payload);
+      toast.success("Invoice rejected");
+      await fetchInvoices();
+      return true;
+    } catch (error: any) {
+      toast.error(error.message || "Failed to reject invoice");
+      return false;
+    }
+  };
+
+  const resubmitInvoice = async (id: string, payload?: { comment?: string }) => {
+    try {
+      await accountingInvoiceApi.resubmit(id, payload || {});
+      toast.success("Invoice resubmitted");
+      await fetchInvoices();
+      return true;
+    } catch (error: any) {
+      toast.error(error.message || "Failed to resubmit invoice");
+      return false;
+    }
+  };
+
   const postInvoice = async (id: string) => {
     try {
       await accountingInvoiceApi.post(id);
@@ -165,7 +205,10 @@ export const useInvoices = () => {
     isLoading,
     createDraft,
     updateDraft,
+    submitInvoice,
     approveInvoice,
+    rejectInvoice,
+    resubmitInvoice,
     postInvoice,
     voidInvoice,
     refetch: fetchInvoices,

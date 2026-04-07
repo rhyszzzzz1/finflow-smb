@@ -1,6 +1,7 @@
 "use strict";
 
 const crypto = require("crypto");
+const { DEFAULT_ACCOUNT_CODES } = require("./chartOfAccountsService");
 
 class PurchaseBillService {
   constructor(pool, options = {}) {
@@ -16,11 +17,17 @@ class PurchaseBillService {
     if (!options.accountingControlService) {
       throw new Error("PurchaseBillService requires an accountingControlService");
     }
+    if (!options.counterpartyService) {
+      throw new Error("PurchaseBillService requires a counterpartyService");
+    }
 
     this.pool = pool;
     this.journalService = options.journalService;
     this.taxService = options.taxService;
     this.accountingControlService = options.accountingControlService;
+    this.counterpartyService = options.counterpartyService;
+    this.businessRelationshipService = options.businessRelationshipService || null;
+    this.approvalWorkflowService = options.approvalWorkflowService || null;
     this.inventoryLedgerService = options.inventoryLedgerService || null;
     this.auditService = options.auditService || null;
     this.idFactory = options.idFactory || (() => crypto.randomUUID());
@@ -76,10 +83,17 @@ class PurchaseBillService {
         company_id VARCHAR(36) NULL,
         user_id VARCHAR(36) NULL,
         bill_no VARCHAR(50) NOT NULL,
+        purchase_order_id VARCHAR(36) NULL,
+        goods_receipt_id VARCHAR(36) NULL,
+        business_relationship_id VARCHAR(36) NULL,
+        counterparty_id VARCHAR(36) NULL,
         vendor_id VARCHAR(36) NULL,
         vendor_name VARCHAR(255) NULL,
+        vendor_legal_name VARCHAR(255) NULL,
         vendor_pan_vat_number VARCHAR(100) NULL,
         vendor_email VARCHAR(255) NULL,
+        vendor_phone VARCHAR(50) NULL,
+        vendor_address TEXT NULL,
         bill_date DATE NOT NULL,
         due_date DATE NOT NULL,
         status ENUM('draft','approved','posted','partially_paid','paid','overdue','void') NOT NULL DEFAULT 'draft',
@@ -106,6 +120,8 @@ class PurchaseBillService {
         id VARCHAR(36) PRIMARY KEY,
         purchase_bill_id VARCHAR(36) NOT NULL,
         line_no INT NOT NULL,
+        purchase_order_line_id VARCHAR(36) NULL,
+        goods_receipt_line_id VARCHAR(36) NULL,
         item_id VARCHAR(36) NULL,
         description VARCHAR(255) NOT NULL,
         quantity DECIMAL(14,4) NOT NULL DEFAULT 0,
@@ -125,9 +141,16 @@ class PurchaseBillService {
       )
       `,
       `ALTER TABLE purchase_bill_headers ADD COLUMN IF NOT EXISTS company_id VARCHAR(36) NULL`,
+      `ALTER TABLE purchase_bill_headers ADD COLUMN IF NOT EXISTS purchase_order_id VARCHAR(36) NULL`,
+      `ALTER TABLE purchase_bill_headers ADD COLUMN IF NOT EXISTS goods_receipt_id VARCHAR(36) NULL`,
+      `ALTER TABLE purchase_bill_headers ADD COLUMN IF NOT EXISTS business_relationship_id VARCHAR(36) NULL`,
+      `ALTER TABLE purchase_bill_headers ADD COLUMN IF NOT EXISTS counterparty_id VARCHAR(36) NULL`,
       `ALTER TABLE purchase_bill_headers ADD COLUMN IF NOT EXISTS vendor_id VARCHAR(36) NULL`,
+      `ALTER TABLE purchase_bill_headers ADD COLUMN IF NOT EXISTS vendor_legal_name VARCHAR(255) NULL`,
       `ALTER TABLE purchase_bill_headers ADD COLUMN IF NOT EXISTS vendor_pan_vat_number VARCHAR(100) NULL`,
       `ALTER TABLE purchase_bill_headers ADD COLUMN IF NOT EXISTS vendor_email VARCHAR(255) NULL`,
+      `ALTER TABLE purchase_bill_headers ADD COLUMN IF NOT EXISTS vendor_phone VARCHAR(50) NULL`,
+      `ALTER TABLE purchase_bill_headers ADD COLUMN IF NOT EXISTS vendor_address TEXT NULL`,
       `ALTER TABLE purchase_bill_headers ADD COLUMN IF NOT EXISTS taxable_amount DECIMAL(14,2) NOT NULL DEFAULT 0`,
       `ALTER TABLE purchase_bill_headers ADD COLUMN IF NOT EXISTS sequence_id VARCHAR(36) NULL`,
       `ALTER TABLE purchase_bill_headers ADD COLUMN IF NOT EXISTS approved_by_user_id VARCHAR(36) NULL`,
@@ -136,6 +159,8 @@ class PurchaseBillService {
       `ALTER TABLE purchase_bill_headers ADD COLUMN IF NOT EXISTS created_by_user_id VARCHAR(36) NULL`,
       `ALTER TABLE purchase_bill_headers MODIFY COLUMN status ENUM('draft','approved','posted','partially_paid','paid','overdue','void') NOT NULL DEFAULT 'draft'`,
       `ALTER TABLE purchase_bill_lines ADD COLUMN IF NOT EXISTS line_no INT NOT NULL DEFAULT 1`,
+      `ALTER TABLE purchase_bill_lines ADD COLUMN IF NOT EXISTS purchase_order_line_id VARCHAR(36) NULL`,
+      `ALTER TABLE purchase_bill_lines ADD COLUMN IF NOT EXISTS goods_receipt_line_id VARCHAR(36) NULL`,
       `ALTER TABLE purchase_bill_lines ADD COLUMN IF NOT EXISTS unit_cost DECIMAL(14,4) NOT NULL DEFAULT 0`,
       `ALTER TABLE purchase_bill_lines ADD COLUMN IF NOT EXISTS discount_type ENUM('none','percentage','fixed') NOT NULL DEFAULT 'none'`,
       `ALTER TABLE purchase_bill_lines ADD COLUMN IF NOT EXISTS discount_value DECIMAL(14,4) NOT NULL DEFAULT 0`,
@@ -157,71 +182,61 @@ class PurchaseBillService {
   }
 
   async resolveCompanyId(conn, actorUserId) {
-    const company = await this.queryOne(
-      conn,
-      `SELECT id
-         FROM companies
-        WHERE legacy_profile_id = ?
-           OR owner_profile_id = ?
-        LIMIT 1`,
-      [actorUserId, actorUserId]
-    ).catch(() => null);
-    return company?.id || actorUserId;
+    return this.counterpartyService.resolveCompanyId(conn, actorUserId);
   }
 
-  async getVendorSnapshot(conn, actorUserId, companyId, vendorId) {
-    const vendor = await this.queryOne(
+  async getVendorSnapshot(conn, actorUserId, companyId, vendorId, input = {}) {
+    // TODO(accounting-refactor): keep this legacy-compatible entry point until
+    // purchase bill payloads stop sending `vendor_id` values that may still
+    // refer to the legacy vendors table instead of the canonical master.
+    const snapshot = await this.counterpartyService.resolveVendorSnapshot(
       conn,
-      `SELECT id,
-              COALESCE(display_name, legal_name) AS vendor_name,
-              pan_vat_number,
-              email
-         FROM vendors
-        WHERE id = ?
-          AND company_id = ?
-        LIMIT 1`,
-      [vendorId, companyId]
-    ).catch(() => null);
-
-    if (vendor) {
-      return {
-        id: vendor.id,
-        vendor_name: vendor.vendor_name,
-        vendor_pan_vat_number: vendor.pan_vat_number || null,
-        vendor_email: vendor.email || null,
-      };
-    }
-
-    const legacy = await this.queryOne(
-      conn,
-      `SELECT v.id,
-              v.vendor_name,
-              COALESCE(p.gst_number, '') AS pan_vat_number,
-              COALESCE(v.email, p.email, '') AS email
-         FROM vendors v
-         LEFT JOIN profiles p ON p.id = v.linked_profile_id
-        WHERE v.id = ?
-          AND v.user_id = ?
-        LIMIT 1`,
-      [vendorId, actorUserId]
+      actorUserId,
+      companyId,
+      vendorId,
+      {
+        ...input,
+        vendor_id: vendorId,
+      }
     );
 
-    if (!legacy) {
-      throw new Error("Vendor not found");
-    }
-
     return {
-      id: legacy.id,
-      vendor_name: legacy.vendor_name,
-      vendor_pan_vat_number: legacy.pan_vat_number || null,
-      vendor_email: legacy.email || null,
+      id: snapshot.id,
+      counterparty_id: snapshot.id,
+      vendor_name: snapshot.display_name,
+      vendor_legal_name: snapshot.legal_name,
+      vendor_pan_vat_number: snapshot.pan_vat_number,
+      vendor_email: snapshot.email,
+      vendor_phone: snapshot.phone,
+      vendor_address: snapshot.address,
+      linked_profile_id: snapshot.linked_profile_id || null,
     };
   }
 
+  async resolveBusinessRelationship(conn, actorUserId, companyId, vendor, payload = {}) {
+    if (!this.businessRelationshipService) {
+      return null;
+    }
+    const relationship = await this.businessRelationshipService.resolveActiveRelationship(conn, {
+      actorUserId,
+      companyId,
+      businessRelationshipId: payload.business_relationship_id || null,
+      counterpartyLinkedProfileId: vendor.linked_profile_id || null,
+      perspective: "buyer",
+    });
+
+    if (payload.business_relationship_id && !relationship) {
+      throw new Error("Business relationship not found or not accepted");
+    }
+
+    return relationship;
+  }
+
   async calculateLine(conn, actorUserId, rawLine) {
+    const procurementRefs = await this.resolveProcurementReferences(conn, actorUserId, rawLine, rawLine.current_bill_id || null);
     const quantity = this.qty(rawLine.quantity);
-    const unitCost = this.qty(rawLine.unit_cost);
-    const description = String(rawLine.description || "").trim();
+    const unitCost = this.qty(rawLine.unit_cost !== undefined ? rawLine.unit_cost : procurementRefs.unit_cost);
+    const description = String(rawLine.description || procurementRefs.description || "").trim();
     const discountType = rawLine.discount_type || "none";
     const discountValue = this.qty(rawLine.discount_value);
     if (!description) throw new Error("Each bill line requires description");
@@ -231,7 +246,8 @@ class PurchaseBillService {
       throw new Error("discount_type must be one of none, percentage, fixed");
     }
 
-    const hasInventoryTarget = !!(rawLine.item_id || rawLine.inventory_account_id);
+    const itemId = rawLine.item_id || procurementRefs.item_id || null;
+    const hasInventoryTarget = !!(itemId || rawLine.inventory_account_id);
     const hasExpenseTarget = !!rawLine.expense_account_id;
     if (!hasInventoryTarget && !hasExpenseTarget) {
       throw new Error("Each purchase bill line must target inventory or an expense account");
@@ -262,7 +278,9 @@ class PurchaseBillService {
     const lineTotal = this.money(taxableBase + lineTaxAmount);
 
     return {
-      item_id: rawLine.item_id || null,
+      purchase_order_line_id: procurementRefs.purchase_order_line_id,
+      goods_receipt_line_id: procurementRefs.goods_receipt_line_id,
+      item_id: itemId,
       description,
       quantity,
       unit_cost: unitCost,
@@ -278,6 +296,82 @@ class PurchaseBillService {
       taxable_amount: taxableBase,
       expense_account_id: rawLine.expense_account_id || null,
       inventory_account_id: rawLine.inventory_account_id || null,
+    };
+  }
+
+  async resolveProcurementReferences(conn, actorUserId, rawLine, currentBillId = null) {
+    let purchaseOrderLine = null;
+    let goodsReceiptLine = null;
+
+    if (rawLine.purchase_order_line_id) {
+      purchaseOrderLine = await this.queryOne(
+        conn,
+        `SELECT pol.*, poh.user_id
+           FROM purchase_order_lines pol
+           JOIN purchase_order_headers poh ON poh.id = pol.purchase_order_id
+          WHERE pol.id = ?
+          LIMIT 1`,
+        [rawLine.purchase_order_line_id]
+      ).catch(() => null);
+      if (!purchaseOrderLine || purchaseOrderLine.user_id !== actorUserId) {
+        throw new Error("Referenced purchase order line not found");
+      }
+    }
+
+    if (rawLine.goods_receipt_line_id) {
+      goodsReceiptLine = await this.queryOne(
+        conn,
+        `SELECT grl.*, grh.user_id
+           FROM goods_receipt_lines grl
+           JOIN goods_receipt_headers grh ON grh.id = grl.goods_receipt_id
+          WHERE grl.id = ?
+          LIMIT 1`,
+        [rawLine.goods_receipt_line_id]
+      ).catch(() => null);
+      if (!goodsReceiptLine || goodsReceiptLine.user_id !== actorUserId) {
+        throw new Error("Referenced goods receipt line not found");
+      }
+    }
+
+    if (goodsReceiptLine?.purchase_order_line_id) {
+      if (purchaseOrderLine && purchaseOrderLine.id !== goodsReceiptLine.purchase_order_line_id) {
+        throw new Error("Goods receipt line does not match the referenced purchase order line");
+      }
+      if (!purchaseOrderLine) {
+        purchaseOrderLine = await this.queryOne(
+          conn,
+          `SELECT pol.*, poh.user_id
+             FROM purchase_order_lines pol
+             JOIN purchase_order_headers poh ON poh.id = pol.purchase_order_id
+            WHERE pol.id = ?
+            LIMIT 1`,
+          [goodsReceiptLine.purchase_order_line_id]
+        ).catch(() => null);
+      }
+    }
+
+    if (goodsReceiptLine) {
+      const billedRow = await this.queryOne(
+        conn,
+        `SELECT COALESCE(SUM(pbl.quantity), 0) AS billed_quantity
+           FROM purchase_bill_lines pbl
+           JOIN purchase_bill_headers pbh ON pbh.id = pbl.purchase_bill_id
+          WHERE pbl.goods_receipt_line_id = ?
+            AND pbh.id <> ?`,
+        [goodsReceiptLine.id, currentBillId || ""]
+      ).catch(() => null);
+      const remaining = this.qty(Number(goodsReceiptLine.received_quantity || 0) - Number(billedRow?.billed_quantity || 0));
+      if (Number(rawLine.quantity || 0) > remaining) {
+        throw new Error("Bill quantity exceeds remaining unbilled quantity on the referenced goods receipt line");
+      }
+    }
+
+    return {
+      purchase_order_line_id: purchaseOrderLine?.id || null,
+      goods_receipt_line_id: goodsReceiptLine?.id || null,
+      item_id: rawLine.item_id || goodsReceiptLine?.item_id || purchaseOrderLine?.item_id || null,
+      description: goodsReceiptLine?.description || purchaseOrderLine?.description || null,
+      unit_cost: goodsReceiptLine?.unit_cost || purchaseOrderLine?.unit_cost || 0,
     };
   }
 
@@ -301,30 +395,114 @@ class PurchaseBillService {
     );
   }
 
-  async replaceBillLines(conn, actorUserId, billId, lines) {
+  isInventoryLine(line) {
+    return !!(line.item_id || line.inventory_account_id);
+  }
+
+  async getGoodsReceiptLineForPosting(conn, companyId, goodsReceiptLineId) {
+    if (!goodsReceiptLineId) return null;
+
+    return this.queryOne(
+      conn,
+      `SELECT
+          grl.*,
+          grh.company_id,
+          grh.user_id,
+          grh.status AS goods_receipt_status,
+          grh.receipt_no
+       FROM goods_receipt_lines grl
+       JOIN goods_receipt_headers grh ON grh.id = grl.goods_receipt_id
+      WHERE grl.id = ?
+        AND grh.company_id = ?
+      LIMIT 1`,
+      [goodsReceiptLineId, companyId]
+    ).catch(() => null);
+  }
+
+  async classifyPostingLine(conn, companyId, header, line) {
+    const taxableAmount = this.money(Number(line.line_subtotal || 0) - Number(line.discount_amount || 0));
+    if (taxableAmount <= 0) {
+      return null;
+    }
+
+    if (line.goods_receipt_line_id) {
+      const goodsReceiptLine = await this.getGoodsReceiptLineForPosting(conn, companyId, line.goods_receipt_line_id);
+      if (!goodsReceiptLine) {
+        throw new Error(`Cannot post purchase bill: referenced goods receipt line ${line.goods_receipt_line_id} was not found in this company.`);
+      }
+      if (goodsReceiptLine.goods_receipt_status !== "posted") {
+        throw new Error(`Cannot post purchase bill: goods receipt ${goodsReceiptLine.receipt_no} must be posted before billing.`);
+      }
+      if (!this.isInventoryLine(line)) {
+        throw new Error("Cannot post purchase bill: GRN-linked lines must be inventory lines.");
+      }
+
+      const grniAmount = this.money(Number(goodsReceiptLine.unit_cost || 0) * Number(line.quantity || 0));
+      if (grniAmount !== taxableAmount) {
+        throw new Error(
+          `Cannot post purchase bill: GRN-linked line ${line.line_no} amount does not match received inventory value. Purchase price variance handling is not configured yet.`
+        );
+      }
+
+      return {
+        accountCode: DEFAULT_ACCOUNT_CODES.goodsReceivedNotInvoiced,
+        debit: grniAmount,
+        credit: 0,
+        vendorId: header.counterparty_id || header.vendor_id || null,
+        itemId: line.item_id || goodsReceiptLine.item_id || null,
+        description: `GRNI clearing for ${header.bill_no}`,
+      };
+    }
+
+    return {
+      accountId: line.inventory_account_id || line.expense_account_id || null,
+      accountCode: !line.inventory_account_id && !line.expense_account_id
+        ? (this.isInventoryLine(line) ? DEFAULT_ACCOUNT_CODES.inventory : DEFAULT_ACCOUNT_CODES.purchases)
+        : undefined,
+      debit: taxableAmount,
+      credit: 0,
+      vendorId: header.counterparty_id || header.vendor_id || null,
+      itemId: line.item_id || null,
+      description: `Purchase line for ${header.bill_no}`,
+    };
+  }
+
+  async normalizeBillLines(conn, actorUserId, billId, lines) {
     const normalizedLines = [];
     for (const line of lines) {
-      normalizedLines.push(await this.calculateLine(conn, actorUserId, line));
+      normalizedLines.push(await this.calculateLine(conn, actorUserId, {
+        ...line,
+        current_bill_id: billId,
+      }));
     }
 
     if (!normalizedLines.length) {
       throw new Error("At least one purchase bill line is required");
     }
 
+    return {
+      lines: normalizedLines,
+      totals: this.deriveHeaderTotals(normalizedLines),
+    };
+  }
+
+  async persistBillLines(conn, billId, normalizedLines) {
     await conn.execute(`DELETE FROM purchase_bill_lines WHERE purchase_bill_id = ?`, [billId]);
 
     for (let i = 0; i < normalizedLines.length; i += 1) {
       const line = normalizedLines[i];
       await conn.execute(
         `INSERT INTO purchase_bill_lines
-          (id, purchase_bill_id, line_no, item_id, description, quantity, unit_cost, discount_type,
+          (id, purchase_bill_id, line_no, purchase_order_line_id, goods_receipt_line_id, item_id, description, quantity, unit_cost, discount_type,
            discount_value, discount_amount, tax_code_id, tax_rate, line_subtotal, line_tax_amount, line_total,
            expense_account_id, inventory_account_id)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           this.idFactory(),
           billId,
           i + 1,
+          line.purchase_order_line_id,
+          line.goods_receipt_line_id,
           line.item_id,
           line.description,
           line.quantity,
@@ -342,11 +520,12 @@ class PurchaseBillService {
         ]
       );
     }
+  }
 
-    return {
-      lines: normalizedLines,
-      totals: this.deriveHeaderTotals(normalizedLines),
-    };
+  async replaceBillLines(conn, actorUserId, billId, lines) {
+    const { lines: normalizedLines, totals } = await this.normalizeBillLines(conn, actorUserId, billId, lines);
+    await this.persistBillLines(conn, billId, normalizedLines);
+    return { lines: normalizedLines, totals };
   }
 
   async getPaymentSnapshot(conn, billId, totalAmount) {
@@ -356,8 +535,9 @@ class PurchaseBillService {
           COALESCE(SUM(CASE WHEN p.type='outgoing' AND p.status='posted' THEN pa.allocated_amount ELSE 0 END), 0) AS allocated_amount
        FROM payment_allocations pa
        LEFT JOIN payments p ON p.id = pa.payment_id
-       WHERE pa.purchase_id = ?`,
-      [billId]
+       WHERE pa.purchase_bill_id = ?
+          OR pa.purchase_id = ?`,
+      [billId, billId]
     ).catch(() => null);
 
     const allocatedAmount = this.money(row?.allocated_amount || 0);
@@ -391,11 +571,38 @@ class PurchaseBillService {
     );
 
     const paymentSnapshot = await this.getPaymentSnapshot(conn, header.id, header.total_amount);
+    const approval = this.approvalWorkflowService
+      ? await this.approvalWorkflowService.buildApprovalView(conn, {
+        companyId: header.company_id || await this.resolveCompanyId(conn, header.user_id),
+        documentType: "purchase_bill",
+        entityId: header.id,
+        header,
+      })
+      : {
+        required: false,
+        workflow_id: null,
+        workflow_name: null,
+        status: header.approval_status || "not_required",
+        current_step_no: null,
+        submitted_at: null,
+        submitted_by_user_id: null,
+        approved_at: header.approved_at || null,
+        approved_by_user_id: header.approved_by_user_id || null,
+        rejected_at: null,
+        rejected_by_user_id: null,
+        rejection_comment: null,
+        decisions: [],
+      };
     return {
       ...header,
       status: this.deriveDisplayStatus(header.status, paymentSnapshot, header.due_date),
       base_status: header.status,
       payment: paymentSnapshot,
+      approval,
+      procurement: {
+        purchase_order_id: header.purchase_order_id || null,
+        goods_receipt_id: header.goods_receipt_id || null,
+      },
       lines,
     };
   }
@@ -403,7 +610,9 @@ class PurchaseBillService {
   async createDraft(actorUserId, payload, requestMeta = {}) {
     return this.withTransaction(async (conn) => {
       const companyId = await this.resolveCompanyId(conn, actorUserId);
-      const vendor = await this.getVendorSnapshot(conn, actorUserId, companyId, payload.vendor_id);
+      const vendorRef = payload.counterparty_id || payload.vendor_id || null;
+      const vendor = await this.getVendorSnapshot(conn, actorUserId, companyId, vendorRef, payload);
+      const businessRelationship = await this.resolveBusinessRelationship(conn, actorUserId, companyId, vendor, payload);
       const billDate = payload.bill_date || new Date().toISOString().slice(0, 10);
       const dueDate = payload.due_date || billDate;
       const numberInfo = await this.accountingControlService.nextDocumentNumber(conn, {
@@ -413,24 +622,30 @@ class PurchaseBillService {
       });
       const billId = this.idFactory();
 
-      await conn.execute(`DELETE FROM purchase_bill_lines WHERE purchase_bill_id = ?`, [billId]);
-      const { totals, lines } = await this.replaceBillLines(conn, actorUserId, billId, payload.lines || []);
+      const { totals, lines } = await this.normalizeBillLines(conn, actorUserId, billId, payload.lines || []);
 
       await conn.execute(
         `INSERT INTO purchase_bill_headers
-          (id, company_id, user_id, bill_no, vendor_id, vendor_name, vendor_pan_vat_number, vendor_email,
-           bill_date, due_date, status, subtotal_amount, discount_amount, taxable_amount, tax_amount, total_amount,
+          (id, company_id, user_id, bill_no, purchase_order_id, goods_receipt_id, business_relationship_id, counterparty_id, vendor_id, vendor_name, vendor_legal_name, vendor_pan_vat_number, vendor_email,
+           vendor_phone, vendor_address, bill_date, due_date, status, subtotal_amount, discount_amount, taxable_amount, tax_amount, total_amount,
            notes, sequence_id, created_by_user_id)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'draft', ?, ?, ?, ?, ?, ?, ?, ?)`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'draft', ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           billId,
           companyId,
           actorUserId,
           numberInfo.documentNumber,
+          payload.purchase_order_id || null,
+          payload.goods_receipt_id || null,
+          businessRelationship?.id || null,
+          vendor.counterparty_id,
           vendor.id,
           vendor.vendor_name,
+          vendor.vendor_legal_name,
           vendor.vendor_pan_vat_number,
           vendor.vendor_email,
+          vendor.vendor_phone,
+          vendor.vendor_address,
           billDate,
           dueDate,
           totals.subtotal_amount,
@@ -444,8 +659,20 @@ class PurchaseBillService {
         ]
       );
 
+      await this.persistBillLines(conn, billId, lines);
+
       const header = await this.queryOne(conn, `SELECT * FROM purchase_bill_headers WHERE id = ?`, [billId]);
-      const hydrated = await this.hydrateBill(conn, header);
+      if (this.approvalWorkflowService) {
+        await this.approvalWorkflowService.initializeDocument(conn, {
+          companyId,
+          documentType: "purchase_bill",
+          entityId: billId,
+        });
+      }
+      const hydrated = await this.hydrateBill(
+        conn,
+        await this.queryOne(conn, `SELECT * FROM purchase_bill_headers WHERE id = ?`, [billId])
+      );
       await this.writeAudit(conn, {
         actorUserId,
         companyId,
@@ -455,6 +682,8 @@ class PurchaseBillService {
         newValues: {
           bill_no: header.bill_no,
           status: header.status,
+          business_relationship_id: header.business_relationship_id,
+          counterparty_id: header.counterparty_id,
           vendor_id: header.vendor_id,
           total_amount: header.total_amount,
           line_count: lines.length,
@@ -484,16 +713,29 @@ class PurchaseBillService {
       const beforeState = await this.hydrateBill(conn, existing);
 
       const companyId = existing.company_id || await this.resolveCompanyId(conn, actorUserId);
-      const vendorId = payload.vendor_id || existing.vendor_id;
-      const vendor = await this.getVendorSnapshot(conn, actorUserId, companyId, vendorId);
+      const vendorId = payload.counterparty_id || payload.vendor_id || existing.counterparty_id || existing.vendor_id;
+      const vendor = await this.getVendorSnapshot(conn, actorUserId, companyId, vendorId, payload);
+      const businessRelationship = await this.resolveBusinessRelationship(conn, actorUserId, companyId, vendor, {
+        ...payload,
+        business_relationship_id: payload.business_relationship_id !== undefined
+          ? payload.business_relationship_id
+          : existing.business_relationship_id,
+      });
       const { totals, lines } = await this.replaceBillLines(conn, actorUserId, billId, payload.lines || []);
 
       await conn.execute(
         `UPDATE purchase_bill_headers
-            SET vendor_id = ?,
+            SET purchase_order_id = ?,
+                goods_receipt_id = ?,
+                business_relationship_id = ?,
+                counterparty_id = ?,
+                vendor_id = ?,
                 vendor_name = ?,
+                vendor_legal_name = ?,
                 vendor_pan_vat_number = ?,
                 vendor_email = ?,
+                vendor_phone = ?,
+                vendor_address = ?,
                 bill_date = ?,
                 due_date = ?,
                 subtotal_amount = ?,
@@ -505,10 +747,17 @@ class PurchaseBillService {
                 updated_at = CURRENT_TIMESTAMP
           WHERE id = ?`,
         [
+          payload.purchase_order_id !== undefined ? payload.purchase_order_id : existing.purchase_order_id,
+          payload.goods_receipt_id !== undefined ? payload.goods_receipt_id : existing.goods_receipt_id,
+          businessRelationship?.id || null,
+          vendor.counterparty_id,
           vendor.id,
           vendor.vendor_name,
+          vendor.vendor_legal_name,
           vendor.vendor_pan_vat_number,
           vendor.vendor_email,
+          vendor.vendor_phone,
+          vendor.vendor_address,
           payload.bill_date || existing.bill_date,
           payload.due_date || existing.due_date,
           totals.subtotal_amount,
@@ -552,8 +801,41 @@ class PurchaseBillService {
         [billId, actorUserId]
       );
       if (!header) throw new Error("Purchase bill not found");
-      if (header.status !== "draft") throw new Error("Only draft bills can be approved");
       const companyId = header.company_id || await this.resolveCompanyId(conn, actorUserId);
+
+      if (this.approvalWorkflowService) {
+        const approvalResult = await this.approvalWorkflowService.approveDocument(conn, {
+          companyId,
+          documentType: "purchase_bill",
+          entityId: billId,
+          actorUserId,
+          comment: requestMeta.comment || requestMeta.reason || null,
+        });
+        if (approvalResult.workflowRequired) {
+          const updated = approvalResult.header;
+          const hydrated = await this.hydrateBill(conn, updated);
+          await this.writeAudit(conn, {
+            actorUserId,
+            companyId,
+            entityType: "purchase_bill",
+            entityId: billId,
+            actionType: "approve",
+            oldValues: { status: header.status, approval_status: header.approval_status || "draft" },
+            newValues: {
+              status: updated.status,
+              approval_status: updated.approval_status,
+              approved_at: updated.approved_at,
+            },
+            ipAddress: requestMeta.ipAddress || null,
+            userAgent: requestMeta.userAgent || null,
+            route: requestMeta.route || null,
+            method: requestMeta.method || null,
+          });
+          return hydrated;
+        }
+      }
+
+      if (header.status !== "draft") throw new Error("Only draft bills can be approved");
 
       await conn.execute(
         `UPDATE purchase_bill_headers
@@ -585,6 +867,109 @@ class PurchaseBillService {
     });
   }
 
+  async submitForApproval(actorUserId, billId, payload = {}, requestMeta = {}) {
+    return this.withTransaction(async (conn) => {
+      const header = await this.queryOne(
+        conn,
+        `SELECT *
+           FROM purchase_bill_headers
+          WHERE id = ?
+            AND user_id = ?
+          FOR UPDATE`,
+        [billId, actorUserId]
+      );
+      if (!header) throw new Error("Purchase bill not found");
+      const companyId = header.company_id || await this.resolveCompanyId(conn, actorUserId);
+
+      if (!this.approvalWorkflowService) {
+        return this.approve(actorUserId, billId, {
+          ...requestMeta,
+          comment: payload.comment || payload.reason || null,
+        });
+      }
+
+      const result = await this.approvalWorkflowService.submitDocument(conn, {
+        companyId,
+        documentType: "purchase_bill",
+        entityId: billId,
+        actorUserId,
+        comment: payload.comment || payload.reason || null,
+      });
+      const updated = result.header && result.header.id
+        ? result.header
+        : await this.queryOne(conn, `SELECT * FROM purchase_bill_headers WHERE id = ?`, [billId]);
+      const hydrated = await this.hydrateBill(conn, updated);
+      await this.writeAudit(conn, {
+        actorUserId,
+        companyId,
+        entityType: "purchase_bill",
+        entityId: billId,
+        actionType: result.workflowRequired ? result.decisionType : "submit_for_approval",
+        oldValues: { status: header.status, approval_status: header.approval_status || "draft" },
+        newValues: { status: updated.status, approval_status: updated.approval_status || "not_required" },
+        reason: payload.comment || payload.reason || null,
+        ipAddress: requestMeta.ipAddress || null,
+        userAgent: requestMeta.userAgent || null,
+        route: requestMeta.route || null,
+        method: requestMeta.method || null,
+      });
+      return hydrated;
+    });
+  }
+
+  async reject(actorUserId, billId, payload = {}, requestMeta = {}) {
+    return this.withTransaction(async (conn) => {
+      const header = await this.queryOne(
+        conn,
+        `SELECT *
+           FROM purchase_bill_headers
+          WHERE id = ?
+            AND user_id = ?
+          FOR UPDATE`,
+        [billId, actorUserId]
+      );
+      if (!header) throw new Error("Purchase bill not found");
+      const companyId = header.company_id || await this.resolveCompanyId(conn, actorUserId);
+      if (!this.approvalWorkflowService) {
+        throw new Error("No approval workflow is configured for purchase bills");
+      }
+
+      const result = await this.approvalWorkflowService.rejectDocument(conn, {
+        companyId,
+        documentType: "purchase_bill",
+        entityId: billId,
+        actorUserId,
+        comment: payload.comment || payload.reason || null,
+      });
+      const updated = result.header;
+      const hydrated = await this.hydrateBill(conn, updated);
+      await this.writeAudit(conn, {
+        actorUserId,
+        companyId,
+        entityType: "purchase_bill",
+        entityId: billId,
+        actionType: "reject",
+        oldValues: { status: header.status, approval_status: header.approval_status || "draft" },
+        newValues: {
+          status: updated.status,
+          approval_status: updated.approval_status,
+          rejected_at: updated.rejected_at,
+          rejection_comment: updated.rejection_comment,
+        },
+        reason: payload.comment || payload.reason || null,
+        ipAddress: requestMeta.ipAddress || null,
+        userAgent: requestMeta.userAgent || null,
+        route: requestMeta.route || null,
+        method: requestMeta.method || null,
+      });
+      return hydrated;
+    });
+  }
+
+  async resubmit(actorUserId, billId, payload = {}, requestMeta = {}) {
+    return this.submitForApproval(actorUserId, billId, payload, requestMeta);
+  }
+
   async post(actorUserId, billId, requestMeta = {}) {
     return this.withTransaction(async (conn) => {
       const header = await this.queryOne(
@@ -597,11 +982,19 @@ class PurchaseBillService {
         [billId, actorUserId]
       );
       if (!header) throw new Error("Purchase bill not found");
-      if (!["approved", "draft"].includes(header.status)) {
-        throw new Error("Only draft or approved bills can be posted");
-      }
       if (header.posted_journal_entry_id) {
         throw new Error("Bill has already been posted");
+      }
+      const companyId = header.company_id || await this.resolveCompanyId(conn, actorUserId);
+      if (this.approvalWorkflowService) {
+        await this.approvalWorkflowService.assertCanPost(conn, {
+          companyId,
+          documentType: "purchase_bill",
+          header,
+        });
+      }
+      if (!["approved", "draft"].includes(header.status)) {
+        throw new Error("Only draft or approved bills can be posted");
       }
 
       const lines = await this.queryAll(
@@ -613,27 +1006,15 @@ class PurchaseBillService {
         [billId]
       );
       if (!lines.length) throw new Error("Bill requires at least one line before posting");
-      await this.accountingControlService.validatePostingDate(conn, header.company_id || await this.resolveCompanyId(conn, actorUserId), header.bill_date);
+      await this.accountingControlService.validatePostingDate(conn, companyId, header.bill_date);
 
-      const companyId = header.company_id || await this.resolveCompanyId(conn, actorUserId);
       const totalAmount = this.money(header.total_amount);
       const journalLines = [];
       for (const line of lines) {
-        const taxableAmount = this.money(Number(line.line_subtotal || 0) - Number(line.discount_amount || 0));
-        if (taxableAmount > 0) {
-          journalLines.push({
-            accountId: line.inventory_account_id || line.expense_account_id || null,
-            accountCode: !line.inventory_account_id && !line.expense_account_id
-              ? (line.item_id ? "1200-INVENTORY" : "5100-PURCHASES")
-              : undefined,
-            debit: taxableAmount,
-            credit: 0,
-            vendorId: header.vendor_id || null,
-            itemId: line.item_id || null,
-            description: `Purchase line for ${header.bill_no}`,
-          });
+        const postingLine = await this.classifyPostingLine(conn, companyId, header, line);
+        if (postingLine) {
+          journalLines.push(postingLine);
         }
-
       }
 
       const inputTaxPostings = await this.taxService.buildInputTaxPostings(conn, actorUserId, lines);
@@ -643,7 +1024,7 @@ class PurchaseBillService {
           accountCode: posting.accountCode,
           debit: posting.amount,
           credit: 0,
-          vendorId: header.vendor_id || null,
+          vendorId: header.counterparty_id || header.vendor_id || null,
           description: `Input VAT for ${header.bill_no}`,
         });
       }
@@ -652,7 +1033,7 @@ class PurchaseBillService {
         accountCode: "2100-AP",
         debit: 0,
         credit: totalAmount,
-        vendorId: header.vendor_id || null,
+        vendorId: header.counterparty_id || header.vendor_id || null,
         description: `Accounts payable for ${header.bill_no}`,
       });
 
@@ -664,36 +1045,36 @@ class PurchaseBillService {
         memo: `Post purchase bill ${header.bill_no}`,
         createdByUserId: actorUserId,
         requestMeta,
+        conn,
         lines: journalLines,
       });
+
+      const inventoryHookResults = [];
+      if (this.inventoryLedgerService) {
+        for (const line of lines.filter((line) => (line.item_id || line.inventory_account_id) && !line.goods_receipt_line_id)) {
+          const result = await this.inventoryLedgerService.applyPurchaseReceipt({
+            companyId,
+            itemId: line.item_id || null,
+            productName: line.description,
+            sku: null,
+            quantity: line.quantity,
+            totalAmount: this.money(Number(line.line_subtotal || 0) - Number(line.discount_amount || 0)),
+            purchaseId: billId,
+            createdByUserId: actorUserId,
+            newId: this.idFactory,
+            conn,
+          });
+          inventoryHookResults.push({ ...result, line_no: line.line_no });
+        }
+      }
 
       const postedJournal = await this.journalService.postJournalEntry({
         companyId,
         journalEntryId: journalEntry.id,
         actorUserId,
         requestMeta,
+        conn,
       });
-
-      const inventoryHookResults = [];
-      if (this.inventoryLedgerService) {
-        for (const line of lines.filter((line) => line.item_id || line.inventory_account_id)) {
-          try {
-            const result = await this.inventoryLedgerService.applyPurchaseReceipt({
-              companyId: actorUserId,
-              productName: line.description,
-              sku: null,
-              quantity: line.quantity,
-              totalAmount: this.money(Number(line.line_subtotal || 0) - Number(line.discount_amount || 0)),
-              purchaseId: billId,
-              createdByUserId: actorUserId,
-              newId: this.idFactory,
-            });
-            inventoryHookResults.push(result);
-          } catch (error) {
-            inventoryHookResults.push({ applied: false, message: error.message, line_no: line.line_no });
-          }
-        }
-      }
 
       await conn.execute(
         `UPDATE purchase_bill_headers

@@ -19,28 +19,62 @@ const { AccountingEngine } = require("./services/accountingEngine");
 const { JournalService } = require("./services/journalService");
 const { InvoicePurchaseService } = require("./services/invoicePurchaseService");
 const { AccountingReportsService } = require("./services/accountingReportsService");
-const { SalesInvoiceService } = require("./services/salesInvoiceService");
+const { SalesInvoiceService, SALES_INVOICE_SERVICE_BUILD_ID } = require("./services/salesInvoiceService");
+const { ApprovalWorkflowService } = require("./services/approvalWorkflowService");
+const { SalesQuoteService } = require("./services/salesQuoteService");
+const { SalesOrderService } = require("./services/salesOrderService");
 const { PurchaseBillService } = require("./services/purchaseBillService");
+const { PurchaseOrderService } = require("./services/purchaseOrderService");
+const { GoodsReceiptService } = require("./services/goodsReceiptService");
+const { SalesCreditNoteService } = require("./services/salesCreditNoteService");
+const { PurchaseDebitNoteService } = require("./services/purchaseDebitNoteService");
 const { SettlementService } = require("./services/settlementService");
 const { TaxService } = require("./services/taxService");
+const { CounterpartyService } = require("./services/counterpartyService");
+const { BusinessRelationshipService } = require("./services/businessRelationshipService");
 const { AccountingControlService } = require("./services/accountingControlService");
+const { ChartOfAccountsService } = require("./services/chartOfAccountsService");
 const { AuditService } = require("./services/auditService");
 const { PaymentModel } = require("./models/paymentModel");
 const { PaymentService } = require("./services/paymentService");
 const { PaymentController } = require("./controllers/paymentController");
 const { SalesInvoiceController } = require("./controllers/salesInvoiceController");
+const { SalesQuoteController } = require("./controllers/salesQuoteController");
+const { SalesOrderController } = require("./controllers/salesOrderController");
 const { PurchaseBillController } = require("./controllers/purchaseBillController");
+const { PurchaseOrderController } = require("./controllers/purchaseOrderController");
+const { GoodsReceiptController } = require("./controllers/goodsReceiptController");
+const { SalesCreditNoteController } = require("./controllers/salesCreditNoteController");
+const { PurchaseDebitNoteController } = require("./controllers/purchaseDebitNoteController");
 const { InventoryController } = require("./controllers/inventoryController");
+const { BusinessRelationshipController } = require("./controllers/businessRelationshipController");
 const { InventoryRepository } = require("./repositories/inventoryRepository");
 const { InventoryService } = require("./services/inventoryService");
 const { createPaymentRoutes } = require("./routes/paymentRoutes");
 const { createSalesInvoiceRoutes } = require("./routes/salesInvoiceRoutes");
+const { createSalesQuoteRoutes } = require("./routes/salesQuoteRoutes");
+const { createSalesOrderRoutes } = require("./routes/salesOrderRoutes");
 const { createPurchaseBillRoutes } = require("./routes/purchaseBillRoutes");
+const { createPurchaseOrderRoutes } = require("./routes/purchaseOrderRoutes");
+const { createGoodsReceiptRoutes } = require("./routes/goodsReceiptRoutes");
+const { createSalesCreditNoteRoutes } = require("./routes/salesCreditNoteRoutes");
+const { createPurchaseDebitNoteRoutes } = require("./routes/purchaseDebitNoteRoutes");
 const { createInventoryRoutes } = require("./routes/inventoryRoutes");
+const { createBusinessRelationshipRoutes } = require("./routes/businessRelationshipRoutes");
 const { createAuditRequestMiddleware } = require("./middleware/auditRequestMiddleware");
 const { instrumentLegacyWriteGuards } = require("./utils/legacyWriteGuard");
 
-dotenv.config({ path: path.join(__dirname, "../.env") });
+const rootEnvPath = path.join(__dirname, "../.env");
+dotenv.config({ path: rootEnvPath });
+// Prefer PORT from .env over a stale parent-shell PORT (common when dev shells export PORT=5001, etc.)
+try {
+    const parsed = dotenv.parse(fs.readFileSync(rootEnvPath, "utf8"));
+    if (parsed.PORT && String(parsed.PORT).trim()) {
+        process.env.PORT = String(parsed.PORT).trim();
+    }
+} catch (_e) {
+    // .env may be absent in some deployments
+}
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -254,35 +288,102 @@ const accountingPool = mysqlPromise.createPool({
     connectionLimit: 5,
     queueLimit: 0,
 });
+const { instrumentMysqlPromiseExecutable } = require("./utils/sqlParams");
+instrumentMysqlPromiseExecutable(accountingPool);
 instrumentLegacyWriteGuards(accountingPool, (operation) => ({
     origin: "accounting services",
     operation,
 }));
+const chartOfAccountsService = new ChartOfAccountsService(accountingPool);
 const dbPromise = db.promise();
+instrumentMysqlPromiseExecutable(dbPromise);
 
 const accountingEngine = new AccountingEngine(accountingPool);
 const auditService = new AuditService(accountingPool, { idFactory: newId });
+const approvalWorkflowService = new ApprovalWorkflowService(accountingPool, {
+    auditService,
+    idFactory: newId,
+});
+const counterpartyService = new CounterpartyService(accountingPool, { idFactory: newId });
 const accountingControlService = new AccountingControlService(accountingPool, {
+    counterpartyService,
     allowSoftLockedBackdatedPosting: String(process.env.ALLOW_SOFT_LOCKED_BACKDATED_POSTING || "false").toLowerCase() === "true",
 });
 const journalService = new JournalService(accountingPool, {
     accountingControlService,
     auditService,
 });
-const taxService = new TaxService(accountingPool);
+const taxService = new TaxService(accountingPool, { counterpartyService });
+const businessRelationshipService = new BusinessRelationshipService(accountingPool, { idFactory: newId });
 const inventoryLedgerService = new InventoryLedgerService(db, { accountingEngine });
 const invoicePurchaseService = new InvoicePurchaseService(db);
 const salesInvoiceService = new SalesInvoiceService(accountingPool, {
     journalService,
     taxService,
+    counterpartyService,
+    businessRelationshipService,
+    approvalWorkflowService,
     accountingControlService,
     inventoryLedgerService,
+    auditService,
+    idFactory: newId,
+});
+const salesOrderService = new SalesOrderService(accountingPool, {
+    counterpartyService,
+    businessRelationshipService,
+    accountingControlService,
+    salesInvoiceService,
+    auditService,
+    idFactory: newId,
+});
+const salesQuoteService = new SalesQuoteService(accountingPool, {
+    counterpartyService,
+    businessRelationshipService,
+    accountingControlService,
+    salesOrderService,
     auditService,
     idFactory: newId,
 });
 const purchaseBillService = new PurchaseBillService(accountingPool, {
     journalService,
     taxService,
+    counterpartyService,
+    businessRelationshipService,
+    approvalWorkflowService,
+    accountingControlService,
+    inventoryLedgerService,
+    auditService,
+    idFactory: newId,
+});
+const purchaseOrderService = new PurchaseOrderService(accountingPool, {
+    counterpartyService,
+    businessRelationshipService,
+    accountingControlService,
+    auditService,
+    idFactory: newId,
+});
+const goodsReceiptService = new GoodsReceiptService(accountingPool, {
+    counterpartyService,
+    businessRelationshipService,
+    accountingControlService,
+    inventoryLedgerService,
+    journalService,
+    auditService,
+    idFactory: newId,
+});
+const salesCreditNoteService = new SalesCreditNoteService(accountingPool, {
+    journalService,
+    taxService,
+    counterpartyService,
+    accountingControlService,
+    inventoryLedgerService,
+    auditService,
+    idFactory: newId,
+});
+const purchaseDebitNoteService = new PurchaseDebitNoteService(accountingPool, {
+    journalService,
+    taxService,
+    counterpartyService,
     accountingControlService,
     inventoryLedgerService,
     auditService,
@@ -290,27 +391,46 @@ const purchaseBillService = new PurchaseBillService(accountingPool, {
 });
 const settlementService = new SettlementService(accountingPool, {
     journalService,
+    counterpartyService,
     accountingControlService,
     auditService,
     idFactory: newId,
 });
-const accountingReportsService = new AccountingReportsService(db);
+const accountingReportsService = new AccountingReportsService(db, {
+    counterpartyService,
+    pool: accountingPool,
+});
 const paymentModel = new PaymentModel(settlementService);
 const paymentService = new PaymentService(paymentModel, newId);
 const paymentController = new PaymentController(paymentService);
 const salesInvoiceController = new SalesInvoiceController(salesInvoiceService);
+const salesQuoteController = new SalesQuoteController(salesQuoteService);
+const salesOrderController = new SalesOrderController(salesOrderService);
 const purchaseBillController = new PurchaseBillController(purchaseBillService);
+const purchaseOrderController = new PurchaseOrderController(purchaseOrderService);
+const goodsReceiptController = new GoodsReceiptController(goodsReceiptService);
+const salesCreditNoteController = new SalesCreditNoteController(salesCreditNoteService);
+const purchaseDebitNoteController = new PurchaseDebitNoteController(purchaseDebitNoteService);
 const inventoryRepository = new InventoryRepository(dbPromise);
 const inventoryService = new InventoryService({
     inventoryRepository,
     inventoryLedgerService,
+    counterpartyService,
     idFactory: newId,
 });
 const inventoryController = new InventoryController(inventoryService, auditService);
+const businessRelationshipController = new BusinessRelationshipController(businessRelationshipService);
 const paymentRoutes = createPaymentRoutes({ authenticate, paymentController });
 const salesInvoiceRoutes = createSalesInvoiceRoutes({ authenticate, salesInvoiceController });
+const salesQuoteRoutes = createSalesQuoteRoutes({ authenticate, salesQuoteController });
+const salesOrderRoutes = createSalesOrderRoutes({ authenticate, salesOrderController });
 const purchaseBillRoutes = createPurchaseBillRoutes({ authenticate, purchaseBillController });
+const purchaseOrderRoutes = createPurchaseOrderRoutes({ authenticate, purchaseOrderController });
+const goodsReceiptRoutes = createGoodsReceiptRoutes({ authenticate, goodsReceiptController });
+const salesCreditNoteRoutes = createSalesCreditNoteRoutes({ authenticate, salesCreditNoteController });
+const purchaseDebitNoteRoutes = createPurchaseDebitNoteRoutes({ authenticate, purchaseDebitNoteController });
 const inventoryRoutes = createInventoryRoutes({ authenticate, inventoryController });
+const businessRelationshipRoutes = createBusinessRelationshipRoutes({ authenticate, businessRelationshipController });
 
 db.connect((err) => {
     if (err) {
@@ -353,6 +473,9 @@ function authenticateAdmin(req, res, next) {
 // ── DB Init ────────────────────────────────────────────────
 function initDB() {
     const sql = `
+    -- TODO(accounting-refactor): profiles is still the runtime root for auth,
+    -- tenancy, and many foreign keys. Later prompts should split this into a
+    -- clearer company/user model without breaking current imports or auth.
     CREATE TABLE IF NOT EXISTS profiles (
       id            VARCHAR(36)  PRIMARY KEY,
       name          VARCHAR(100),
@@ -392,6 +515,10 @@ function initDB() {
       FOREIGN KEY (user_id) REFERENCES profiles(id) ON DELETE CASCADE
     );
 
+    -- TODO(accounting-refactor): the tables below are legacy operational
+    -- compatibility tables. They remain for runtime stability and historical
+    -- reads, but they are no longer the desired source of truth for accounting
+    -- documents, stock, or derived balances.
     CREATE TABLE IF NOT EXISTS inventory (
       id             VARCHAR(36)    PRIMARY KEY,
       user_id        VARCHAR(36)    NOT NULL,
@@ -569,7 +696,7 @@ function initDB() {
             KEY idx_audit_user_date (user_id, created_at)
         );
   `;
-    db.query(sql, (err) => {
+    db.query(sql, async (err) => {
         if (err) console.error("? DB init error:", err.message);
         else {
             db.query("ALTER TABLE clients ADD COLUMN IF NOT EXISTS linked_profile_id VARCHAR(36) NULL", () => { });
@@ -580,35 +707,61 @@ function initDB() {
             db.query("ALTER TABLE purchases ADD COLUMN IF NOT EXISTS status ENUM('draft','posted','void') NOT NULL DEFAULT 'posted'", () => { });
             db.query("ALTER TABLE purchases ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMP NULL DEFAULT NULL", () => { });
             db.query("ALTER TABLE invoices ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMP NULL DEFAULT NULL", () => { });
-            settlementService.ensureSchema().catch((schemaErr) => {
-                console.error("[SETTLEMENT_SCHEMA_INIT_ERROR]", schemaErr.message);
-            });
-            inventoryLedgerService.ensureSchema().catch((schemaErr) => {
-                console.error("[INVENTORY_LEDGER_SCHEMA_INIT_ERROR]", schemaErr.message);
-            });
-            invoicePurchaseService.ensureSchema().catch((schemaErr) => {
-                console.error("[INVOICE_PURCHASE_SCHEMA_INIT_ERROR]", schemaErr.message);
-            });
-            auditService.ensureSchema().catch((schemaErr) => {
-                console.error("[AUDIT_SCHEMA_INIT_ERROR]", schemaErr.message);
-            });
-            accountingControlService.ensureSchema().catch((schemaErr) => {
-                console.error("[ACCOUNTING_CONTROL_SCHEMA_INIT_ERROR]", schemaErr.message);
-            });
-            journalService.ensureSchema().catch((schemaErr) => {
-                console.error("[JOURNAL_SCHEMA_INIT_ERROR]", schemaErr.message);
-            });
-            taxService.ensureSchema().catch((schemaErr) => {
-                console.error("[TAX_SCHEMA_INIT_ERROR]", schemaErr.message);
-            });
-            salesInvoiceService.ensureSchema().catch((schemaErr) => {
-                console.error("[SALES_INVOICE_SCHEMA_INIT_ERROR]", schemaErr.message);
-            });
-            purchaseBillService.ensureSchema().catch((schemaErr) => {
-                console.error("[PURCHASE_BILL_SCHEMA_INIT_ERROR]", schemaErr.message);
-            });
+            db.query("ALTER TABLE profiles ADD COLUMN IF NOT EXISTS is_admin TINYINT(1) DEFAULT 0", () => { });
+            const schemaInitializers = [
+                ["SETTLEMENT", () => settlementService.ensureSchema()],
+                ["INVENTORY_LEDGER", () => inventoryLedgerService.ensureSchema()],
+                ["INVENTORY_REPOSITORY", () => inventoryRepository.ensureSchema()],
+                ["INVOICE_PURCHASE", () => invoicePurchaseService.ensureSchema()],
+                ["AUDIT", () => auditService.ensureSchema()],
+                ["APPROVAL_WORKFLOW", () => approvalWorkflowService.ensureSchema()],
+                ["ACCOUNTING_CONTROL", () => accountingControlService.ensureSchema()],
+                ["JOURNAL", () => journalService.ensureSchema()],
+                [
+                    "CHART_OF_ACCOUNTS_DEFAULTS",
+                    async () => {
+                        await chartOfAccountsService.ensureBaseSchema();
+                        try {
+                            const [companyRows] = await accountingPool.execute(`SELECT id FROM companies`);
+                            for (const row of companyRows) {
+                                await chartOfAccountsService.seedDefaultAccountsForCompany(row.id);
+                            }
+                        } catch (coaCompanyErr) {
+                            console.warn("[COA_SEED_COMPANIES]", coaCompanyErr.message);
+                        }
+                        try {
+                            const [profileRows] = await accountingPool.execute(`SELECT id FROM profiles`);
+                            for (const row of profileRows) {
+                                await chartOfAccountsService.seedDefaultAccountsForCompany(row.id);
+                            }
+                        } catch (coaProfileErr) {
+                            console.warn("[COA_SEED_PROFILES]", coaProfileErr.message);
+                        }
+                    },
+                ],
+                ["TAX", () => taxService.ensureSchema()],
+                ["COUNTERPARTY", () => counterpartyService.ensureSchema()],
+                ["BUSINESS_RELATIONSHIP", () => businessRelationshipService.ensureSchema()],
+                ["SALES_INVOICE", () => salesInvoiceService.ensureSchema()],
+                ["SALES_ORDER", () => salesOrderService.ensureSchema()],
+                ["SALES_QUOTE", () => salesQuoteService.ensureSchema()],
+                ["PURCHASE_BILL", () => purchaseBillService.ensureSchema()],
+                ["PURCHASE_ORDER", () => purchaseOrderService.ensureSchema()],
+                ["GOODS_RECEIPT", () => goodsReceiptService.ensureSchema()],
+                ["SALES_CREDIT_NOTE", () => salesCreditNoteService.ensureSchema()],
+                ["PURCHASE_DEBIT_NOTE", () => purchaseDebitNoteService.ensureSchema()],
+            ];
+
+            for (const [schemaName, runInitializer] of schemaInitializers) {
+                try {
+                    await runInitializer();
+                } catch (schemaErr) {
+                    console.error(`[${schemaName}_SCHEMA_INIT_ERROR]`, schemaErr.message);
+                }
+            }
             console.log("? Database tables ready");
         }
+        startHttpServer();
     });
 }
 
@@ -620,23 +773,76 @@ app.get("/api/system/email-status", (_req, res) => {
     res.json(getEmailConfigStatus());
 });
 
-app.get("/api/accounts/registered", authenticate, (req, res) => {
-    db.query(
-        `SELECT id, name, email, business_name
-         FROM profiles
-         WHERE id <> ? AND is_admin = 0
-         ORDER BY COALESCE(business_name, name, email) ASC`,
-        [req.user.id],
-        (err, rows) => {
-            if (err) return res.status(500).json({ message: err.message });
-            res.json(rows);
-        }
-    );
+// Lists every non-admin profile (minus self) for relationship/client linking — intentional but
+// privacy-sensitive: any authenticated user can enumerate other tenants' emails. Tighten if needed.
+app.get("/api/accounts/registered", authenticate, async (req, res) => {
+    const conn = await accountingPool.getConnection();
+    try {
+        const [rows] = await conn.execute(
+            `SELECT id, name, email, business_name
+             FROM profiles
+             WHERE id <> ? AND is_admin = 0
+             ORDER BY COALESCE(business_name, name, email) ASC`,
+            [req.user.id]
+        );
+        res.json(rows);
+    } catch (err) {
+        res.status(500).json({ message: err.message });
+    } finally {
+        conn.release();
+    }
+});
+
+app.get("/api/counterparties", authenticate, async (req, res) => {
+    const conn = await accountingPool.getConnection();
+    try {
+        const companyId = await counterpartyService.resolveCompanyId(conn, req.user.id);
+        const [rows] = await conn.execute(
+            `SELECT cp.*,
+                    GROUP_CONCAT(cr.role_type ORDER BY cr.role_type ASC) AS role_types
+               FROM counterparties cp
+               LEFT JOIN counterparty_roles cr ON cr.counterparty_id = cp.id
+              WHERE cp.company_id = ?
+              GROUP BY cp.id
+              ORDER BY cp.display_name ASC`,
+            [companyId]
+        );
+        res.json(rows.map((row) => ({
+            ...row,
+            role_types: row.role_types ? String(row.role_types).split(",") : [],
+        })));
+    } catch (err) {
+        res.status(500).json({ message: err.message });
+    } finally {
+        conn.release();
+    }
+});
+
+app.post("/api/counterparties", authenticate, async (req, res) => {
+    const conn = await accountingPool.getConnection();
+    try {
+        await conn.beginTransaction();
+        const created = await counterpartyService.createOrUpdateCounterparty(conn, req.user.id, req.body || {});
+        await conn.commit();
+        res.status(201).json(created);
+    } catch (err) {
+        try { await conn.rollback(); } catch (_rollbackErr) { }
+        res.status(400).json({ message: err.message });
+    } finally {
+        conn.release();
+    }
 });
 
 app.use("/api", paymentRoutes);
+app.use("/api", businessRelationshipRoutes);
 app.use("/api/accounting", salesInvoiceRoutes);
+app.use("/api/accounting", salesQuoteRoutes);
+app.use("/api/accounting", salesOrderRoutes);
 app.use("/api/accounting", purchaseBillRoutes);
+app.use("/api/accounting", purchaseOrderRoutes);
+app.use("/api/accounting", goodsReceiptRoutes);
+app.use("/api/accounting", salesCreditNoteRoutes);
+app.use("/api/accounting", purchaseDebitNoteRoutes);
 app.use("/api", inventoryRoutes);
 
 // ===========================================================
@@ -891,14 +1097,107 @@ function handleLogin(req, res) {
     );
 }
 
+async function handleLoginWithPool(req, res) {
+    const { email, password } = req.body;
+    console.log(`[LOGIN] attempt email=${email}`);
+    const requestMeta = getRequestMeta(req);
+
+    if (!email || !password) {
+        return res.status(400).json({ message: "Email and password are required" });
+    }
+
+    const normalEmail = email.toLowerCase().trim();
+
+    const conn = await accountingPool.getConnection();
+
+    try {
+        const [rows] = await conn.execute(
+            "SELECT * FROM profiles WHERE email = ?",
+            [normalEmail]
+        );
+
+        console.log(`[LOGIN] found ${rows.length} row(s) for ${normalEmail}`);
+
+        if (!rows.length) {
+            auditService.logAction({
+                entityType: "auth_session",
+                actionType: "login",
+                reason: "Invalid credentials",
+                newValues: { email: normalEmail, outcome: "invalid_email" },
+                ipAddress: requestMeta.ipAddress,
+                userAgent: requestMeta.userAgent,
+                route: requestMeta.route,
+                method: requestMeta.method,
+                statusCode: 401,
+            }).catch(() => { });
+            return res.status(401).json({ message: "Invalid credentials" });
+        }
+
+        const user = rows[0];
+        const match = await bcrypt.compare(String(password).trim(), user.password_hash);
+        console.log(`[LOGIN] password match=${match}`);
+
+        if (!match) {
+            auditService.logAction({
+                actorUserId: user.id,
+                companyId: user.id,
+                entityType: "auth_session",
+                entityId: user.id,
+                actionType: "login",
+                reason: "Invalid credentials",
+                newValues: { email: normalEmail, outcome: "invalid_password" },
+                ipAddress: requestMeta.ipAddress,
+                userAgent: requestMeta.userAgent,
+                route: requestMeta.route,
+                method: requestMeta.method,
+                statusCode: 401,
+            }).catch(() => { });
+            return res.status(401).json({ message: "Invalid credentials" });
+        }
+
+        const token = jwt.sign(
+            { id: user.id, email: user.email },
+            JWT_SECRET,
+            { expiresIn: "7d" }
+        );
+
+        console.log(`[LOGIN] success ${normalEmail}`);
+        auditService.logAction({
+            actorUserId: user.id,
+            companyId: user.id,
+            entityType: "auth_session",
+            entityId: user.id,
+            actionType: "login",
+            reason: "User login successful",
+            newValues: { email: user.email, outcome: "success", is_admin: !!user.is_admin },
+            ipAddress: requestMeta.ipAddress,
+            userAgent: requestMeta.userAgent,
+            route: requestMeta.route,
+            method: requestMeta.method,
+            statusCode: 200,
+        }).catch(() => { });
+
+        return res.json({
+            message: "Login successful",
+            token,
+            user: { id: user.id, name: user.name, email: user.email, is_admin: user.is_admin },
+        });
+    } catch (dbErr) {
+        console.error("[LOGIN] DB error:", dbErr.message);
+        return res.status(500).json({ message: "Login error" });
+    } finally {
+        conn.release();
+    }
+}
+
 // Register both URL patterns (api.ts uses /api/login, AuthContext uses /api/auth/login)
 app.post("/api/register", handleRegister); // api.ts
 app.post("/api/auth/signup", handleRegister); // AuthContext
 app.post("/api/verify-signup-otp", handleVerifySignupOtp);
 app.post("/api/auth/verify-signup-otp", handleVerifySignupOtp);
 
-app.post("/api/login", handleLogin);    // api.ts
-app.post("/api/auth/login", handleLogin);    // AuthContext
+app.post("/api/login", handleLoginWithPool);    // api.ts
+app.post("/api/auth/login", handleLoginWithPool);    // AuthContext
 
 // ===========================================================
 // VENDOR PRODUCT CATALOG
@@ -999,6 +1298,9 @@ app.delete("/api/vendor-products/:id", authenticate, (req, res) => {
 // ===========================================================
 // INVENTORY
 // ===========================================================
+// TODO(accounting-refactor): these `_legacy_disabled` handlers document the
+// retired inline inventory CRUD flow. Keep them inert until the frontend and
+// data migration are fully off the old `inventory` table, then remove them.
 
 
 
@@ -1099,6 +1401,9 @@ app.delete("/api/_legacy_disabled/inventory/:id", authenticate, (req, res) => {
 // ===========================================================
 // INVOICES
 // ===========================================================
+// TODO(accounting-refactor): the read-only legacy invoice/purchase/sales routes
+// below exist as temporary compatibility shims. Authoritative write flows live
+// in the accounting modules under `/api/accounting/*`.
 
 app.get("/api/invoices", authenticate, (req, res) => {
     logLegacyEndpointUsage(req, "read", "/api/accounting/sales-invoices");
@@ -1128,6 +1433,9 @@ app.delete("/api/invoices/:id", authenticate, (req, res) => {
 // SALES
 // ===========================================================
 
+// DEPRECATED(accounting-refactor): `sales` is a legacy summary/operational
+// table. Reads remain for compatibility only; authoritative sales come from
+// accounting sales invoices plus posted journals.
 app.get("/api/sales", authenticate, (req, res) => {
     logLegacyEndpointUsage(req, "read", "/api/accounting/sales-invoices");
     db.query("SELECT * FROM sales WHERE user_id = ? ORDER BY sale_date DESC",
@@ -1145,6 +1453,9 @@ app.post("/api/sales", authenticate, (req, res) => {
 // PURCHASES
 // ===========================================================
 
+// DEPRECATED(accounting-refactor): `purchases` is a compatibility read model.
+// Authoritative purchasing is now purchase orders, goods receipts, and
+// purchase bills in the accounting module.
 app.get("/api/purchases", authenticate, (req, res) => {
     logLegacyEndpointUsage(req, "read", "/api/accounting/purchase-bills");
     db.query("SELECT * FROM purchases WHERE user_id = ? AND COALESCE(status,'posted')!='void' ORDER BY purchase_date DESC",
@@ -1162,6 +1473,9 @@ app.post("/api/purchases", authenticate, (req, res) => {
 // V2 SALES INVOICES / PURCHASE BILLS (LINE ITEM MODELS)
 // ===========================================================
 
+// DEPRECATED(accounting-refactor): these transitional /api/v2 routes expose
+// newer tables through old endpoint shapes. Keep reads temporarily, but do not
+// add any new business logic here.
 app.post("/api/v2/sales-invoices", authenticate, async (req, res) => {
     logLegacyEndpointUsage(req, "write", "/api/accounting/sales-invoices");
     res.status(410).json({ message: "Legacy /api/v2 sales invoice draft endpoint disabled. Use /api/accounting/sales-invoices instead." });
@@ -1247,6 +1561,10 @@ app.delete("/api/purchases/:id", authenticate, (req, res) => {
 // ===========================================================
 
 app.get("/api/reports", authenticate, (req, res) => {
+    // TODO(accounting-refactor): this compatibility summary endpoint still mixes
+    // legacy sales/purchases summary tables with newer settlement and stock
+    // sources. Keep the payload stable for now, but avoid name-based grouping
+    // whenever an accounting document identifier is available.
     if (req.query.export || req.query.format) {
         auditService.logAction({
             actorUserId: req.user.id,
@@ -1361,9 +1679,18 @@ app.get("/api/reports", authenticate, (req, res) => {
                             (eErr, expRows) => {
                                 // Top clients by revenue
                                 db.query(
-                                    `SELECT client_name, COALESCE(SUM(amount),0) AS total
-                                     FROM sales WHERE user_id=?
-                                     GROUP BY client_name ORDER BY total DESC LIMIT 5`,
+                                    `SELECT
+                                        COALESCE(si.counterparty_id, si.customer_id, CONCAT('legacy:', si.customer_name)) AS counterparty_ref,
+                                        MAX(si.customer_name) AS client_name,
+                                        COALESCE(SUM(si.total_amount),0) AS total,
+                                        CASE WHEN COALESCE(si.counterparty_id, si.customer_id) IS NULL THEN 1 ELSE 0 END AS legacy_derived
+                                     FROM sales_invoice_headers si
+                                     WHERE si.user_id=?
+                                       AND si.posted_journal_entry_id IS NOT NULL
+                                       AND si.status!='void'
+                                     GROUP BY COALESCE(si.counterparty_id, si.customer_id, CONCAT('legacy:', si.customer_name))
+                                     ORDER BY total DESC
+                                     LIMIT 5`,
                                     [uid],
                                     (cErr, clientRows) => {
                                         res.json({
@@ -1381,7 +1708,11 @@ app.get("/api/reports", authenticate, (req, res) => {
                                             },
                                             monthlyRevenue: rErr ? [] : (revRows || []),
                                             monthlyExpenses: eErr ? [] : (expRows || []),
-                                            topClients: cErr ? [] : (clientRows || []),
+                                            topClients: cErr ? [] : (clientRows || []).map((row) => ({
+                                                client_name: row.client_name,
+                                                total: row.total,
+                                                legacy_derived: Boolean(row.legacy_derived),
+                                            })),
                                         });
                                     }
                                 );
@@ -1488,6 +1819,76 @@ app.get("/api/reports/stock-ledger/:itemId", authenticate, async (req, res) => {
             start_date || null,
             end_date || null
         );
+        res.json(report);
+    } catch (err) {
+        res.status(500).json({ message: err.message });
+    }
+});
+
+app.get("/api/reports/reconciliations/ar-control", authenticate, async (req, res) => {
+    try {
+        const { as_of_date } = req.query;
+        const report = await accountingReportsService.arControlReconciliation(req.user.id, as_of_date || null);
+        res.json(report);
+    } catch (err) {
+        res.status(500).json({ message: err.message });
+    }
+});
+
+app.get("/api/reports/reconciliations/ap-control", authenticate, async (req, res) => {
+    try {
+        const { as_of_date } = req.query;
+        const report = await accountingReportsService.apControlReconciliation(req.user.id, as_of_date || null);
+        res.json(report);
+    } catch (err) {
+        res.status(500).json({ message: err.message });
+    }
+});
+
+app.get("/api/reports/reconciliations/inventory-control", authenticate, async (req, res) => {
+    try {
+        const { as_of_date } = req.query;
+        const report = await accountingReportsService.inventoryControlReconciliation(req.user.id, as_of_date || null);
+        res.json(report);
+    } catch (err) {
+        res.status(500).json({ message: err.message });
+    }
+});
+
+app.get("/api/reports/reconciliations/tax-control", authenticate, async (req, res) => {
+    try {
+        const { as_of_date } = req.query;
+        const report = await accountingReportsService.taxControlReconciliation(req.user.id, as_of_date || null);
+        res.json(report);
+    } catch (err) {
+        res.status(500).json({ message: err.message });
+    }
+});
+
+app.get("/api/reports/reconciliations/advances", authenticate, async (req, res) => {
+    try {
+        const { as_of_date } = req.query;
+        const report = await accountingReportsService.advancesReconciliation(req.user.id, as_of_date || null);
+        res.json(report);
+    } catch (err) {
+        res.status(500).json({ message: err.message });
+    }
+});
+
+app.get("/api/reports/reconciliations/grni-control", authenticate, async (req, res) => {
+    try {
+        const { as_of_date } = req.query;
+        const report = await accountingReportsService.grniControlReconciliation(req.user.id, as_of_date || null);
+        res.json(report);
+    } catch (err) {
+        res.status(500).json({ message: err.message });
+    }
+});
+
+app.get("/api/reports/reconciliations/summary", authenticate, async (req, res) => {
+    try {
+        const { as_of_date } = req.query;
+        const report = await accountingReportsService.reconciliationSummary(req.user.id, as_of_date || null);
         res.json(report);
     } catch (err) {
         res.status(500).json({ message: err.message });
@@ -1636,17 +2037,23 @@ app.get("/api/clients/sales", authenticate, (req, res) => {
     db.query(
         `SELECT
            c.id,
+           c.counterparty_id,
            c.linked_profile_id,
            c.client_name,
            c.email,
            c.phone,
-           COUNT(DISTINCT i.id)                          AS total_invoices,
-           COALESCE(SUM(i.total_amount), 0)              AS total_amount,
-           COALESCE(SUM(CASE WHEN i.status!='paid' THEN i.total_amount ELSE 0 END), 0) AS outstanding_amount
+           COUNT(DISTINCT si.id)                         AS total_invoices,
+           COALESCE(SUM(si.total_amount), 0)             AS total_amount,
+           COALESCE(SUM(CASE WHEN si.status NOT IN ('paid','void') THEN si.total_amount ELSE 0 END), 0) AS outstanding_amount
          FROM clients c
-         LEFT JOIN invoices i ON i.client_name = c.client_name AND i.user_id = c.user_id
+         LEFT JOIN sales_invoice_headers si
+           ON si.user_id = c.user_id
+          AND (
+            si.counterparty_id = c.counterparty_id
+            OR (c.counterparty_id IS NULL AND si.customer_name = c.client_name)
+          )
          WHERE c.user_id = ?
-         GROUP BY c.id, c.linked_profile_id, c.client_name, c.email, c.phone
+         GROUP BY c.id, c.counterparty_id, c.linked_profile_id, c.client_name, c.email, c.phone
          ORDER BY c.client_name ASC`,
         [req.user.id], (err, rows) => {
             if (err) return res.status(500).json({ message: err.message });
@@ -1655,33 +2062,60 @@ app.get("/api/clients/sales", authenticate, (req, res) => {
     );
 });
 
-app.post("/api/clients", authenticate, (req, res) => {
+app.post("/api/clients", authenticate, async (req, res) => {
     const { linked_profile_id } = req.body;
     if (!linked_profile_id) return res.status(400).json({ message: "linked_profile_id is required" });
     if (linked_profile_id === req.user.id) return res.status(400).json({ message: "You cannot add your own account as a client" });
 
-    db.query("SELECT id FROM clients WHERE user_id = ? AND linked_profile_id = ?", [req.user.id, linked_profile_id], (dupErr, dupRows) => {
-        if (dupErr) return res.status(500).json({ message: dupErr.message });
+    try {
+        const [dupRows] = await dbPromise.execute("SELECT id FROM clients WHERE user_id = ? AND linked_profile_id = ?", [req.user.id, linked_profile_id]);
         if (dupRows.length) return res.status(400).json({ message: "Client already linked" });
 
-        db.query("SELECT id, name, email, business_name FROM profiles WHERE id = ? AND is_admin = 0", [linked_profile_id], (profileErr, profileRows) => {
-            if (profileErr) return res.status(500).json({ message: profileErr.message });
-            if (!profileRows.length) return res.status(404).json({ message: "Registered business account not found" });
+        const [profileRows] = await dbPromise.execute("SELECT id, name, email, business_name, gst_number, address FROM profiles WHERE id = ? AND is_admin = 0", [linked_profile_id]);
+        if (!profileRows.length) return res.status(404).json({ message: "Registered business account not found" });
 
-            const profile = profileRows[0];
-            const clientName = profile.business_name || profile.name || profile.email;
-            const id = newId();
+        const profile = profileRows[0];
+        const clientName = profile.business_name || profile.name || profile.email;
+        const legacyId = newId();
 
-            db.query(
-                "INSERT INTO clients (id, user_id, linked_profile_id, client_name, email) VALUES (?, ?, ?, ?, ?)",
-                [id, req.user.id, linked_profile_id, clientName, profile.email || null],
-                (err) => {
-                    if (err) return res.status(500).json({ message: err.message });
-                    db.query("SELECT * FROM clients WHERE id = ?", [id], (_e, rows) => res.status(201).json(rows[0]));
-                }
-            );
-        });
-    });
+        const conn = await accountingPool.getConnection();
+        let counterparty;
+        try {
+            await conn.beginTransaction();
+            counterparty = await counterpartyService.createOrUpdateCounterparty(conn, req.user.id, {
+                linked_profile_id,
+                display_name: clientName,
+                legal_name: profile.business_name || profile.name || clientName,
+                tax_number: profile.gst_number || null,
+                email: profile.email || null,
+                address: profile.address || null,
+                role_type: "customer",
+            });
+            await businessRelationshipService.ensureAcceptedRelationship(conn, {
+                company_id: req.user.id,
+                created_by_company_id: req.user.id,
+                created_by_user_id: req.user.id,
+                buyer_profile_id: linked_profile_id,
+                seller_profile_id: req.user.id,
+                notes: "Legacy client link promoted to accepted business relationship",
+            });
+            await conn.commit();
+        } catch (err) {
+            try { await conn.rollback(); } catch (_rollbackErr) { }
+            conn.release();
+            return res.status(500).json({ message: err.message });
+        }
+        conn.release();
+
+        await dbPromise.execute(
+            "INSERT INTO clients (id, user_id, linked_profile_id, counterparty_id, client_name, email) VALUES (?, ?, ?, ?, ?, ?)",
+            [legacyId, req.user.id, linked_profile_id, counterparty.id, clientName, profile.email || null]
+        );
+        const [rows] = await dbPromise.execute("SELECT * FROM clients WHERE id = ?", [legacyId]);
+        return res.status(201).json(rows[0]);
+    } catch (err) {
+        return res.status(500).json({ message: err.message });
+    }
 });
 
 app.delete("/api/clients/:id", authenticate, (req, res) => {
@@ -1711,17 +2145,23 @@ app.get("/api/clients/vendors", authenticate, (req, res) => {
     db.query(
         `SELECT
            v.id,
+           v.counterparty_id,
            v.linked_profile_id,
            v.vendor_name,
            v.email,
            v.phone,
-           COUNT(DISTINCT p.id)                         AS total_payables,
-           COALESCE(SUM(p.amount), 0)                   AS total_amount,
-           COALESCE(SUM(CASE WHEN p.status!='paid' THEN p.amount ELSE 0 END), 0) AS outstanding_amount
+           COUNT(DISTINCT pb.id)                        AS total_payables,
+           COALESCE(SUM(pb.total_amount), 0)            AS total_amount,
+           COALESCE(SUM(CASE WHEN pb.status NOT IN ('paid','void') THEN pb.total_amount ELSE 0 END), 0) AS outstanding_amount
          FROM vendors v
-         LEFT JOIN payables p ON p.vendor_name = v.vendor_name AND p.user_id = v.user_id
+         LEFT JOIN purchase_bill_headers pb
+           ON pb.user_id = v.user_id
+          AND (
+            pb.counterparty_id = v.counterparty_id
+            OR (v.counterparty_id IS NULL AND pb.vendor_name = v.vendor_name)
+          )
          WHERE v.user_id = ?
-         GROUP BY v.id, v.linked_profile_id, v.vendor_name, v.email, v.phone
+         GROUP BY v.id, v.counterparty_id, v.linked_profile_id, v.vendor_name, v.email, v.phone
          ORDER BY v.vendor_name ASC`,
         [req.user.id], (err, rows) => {
             if (err) return res.status(500).json({ message: err.message });
@@ -1730,33 +2170,60 @@ app.get("/api/clients/vendors", authenticate, (req, res) => {
     );
 });
 
-app.post("/api/vendors", authenticate, (req, res) => {
+app.post("/api/vendors", authenticate, async (req, res) => {
     const { linked_profile_id } = req.body;
     if (!linked_profile_id) return res.status(400).json({ message: "linked_profile_id is required" });
     if (linked_profile_id === req.user.id) return res.status(400).json({ message: "You cannot add your own account as a vendor" });
 
-    db.query("SELECT id FROM vendors WHERE user_id = ? AND linked_profile_id = ?", [req.user.id, linked_profile_id], (dupErr, dupRows) => {
-        if (dupErr) return res.status(500).json({ message: dupErr.message });
+    try {
+        const [dupRows] = await dbPromise.execute("SELECT id FROM vendors WHERE user_id = ? AND linked_profile_id = ?", [req.user.id, linked_profile_id]);
         if (dupRows.length) return res.status(400).json({ message: "Vendor already linked" });
 
-        db.query("SELECT id, name, email, business_name FROM profiles WHERE id = ? AND is_admin = 0", [linked_profile_id], (profileErr, profileRows) => {
-            if (profileErr) return res.status(500).json({ message: profileErr.message });
-            if (!profileRows.length) return res.status(404).json({ message: "Registered business account not found" });
+        const [profileRows] = await dbPromise.execute("SELECT id, name, email, business_name, gst_number, address FROM profiles WHERE id = ? AND is_admin = 0", [linked_profile_id]);
+        if (!profileRows.length) return res.status(404).json({ message: "Registered business account not found" });
 
-            const profile = profileRows[0];
-            const vendorName = profile.business_name || profile.name || profile.email;
-            const id = newId();
+        const profile = profileRows[0];
+        const vendorName = profile.business_name || profile.name || profile.email;
+        const legacyId = newId();
 
-            db.query(
-                "INSERT INTO vendors (id, user_id, linked_profile_id, vendor_name, email) VALUES (?, ?, ?, ?, ?)",
-                [id, req.user.id, linked_profile_id, vendorName, profile.email || null],
-                (err) => {
-                    if (err) return res.status(500).json({ message: err.message });
-                    db.query("SELECT * FROM vendors WHERE id = ?", [id], (_e, rows) => res.status(201).json(rows[0]));
-                }
-            );
-        });
-    });
+        const conn = await accountingPool.getConnection();
+        let counterparty;
+        try {
+            await conn.beginTransaction();
+            counterparty = await counterpartyService.createOrUpdateCounterparty(conn, req.user.id, {
+                linked_profile_id,
+                display_name: vendorName,
+                legal_name: profile.business_name || profile.name || vendorName,
+                tax_number: profile.gst_number || null,
+                email: profile.email || null,
+                address: profile.address || null,
+                role_type: "vendor",
+            });
+            await businessRelationshipService.ensureAcceptedRelationship(conn, {
+                company_id: req.user.id,
+                created_by_company_id: req.user.id,
+                created_by_user_id: req.user.id,
+                buyer_profile_id: req.user.id,
+                seller_profile_id: linked_profile_id,
+                notes: "Legacy vendor link promoted to accepted business relationship",
+            });
+            await conn.commit();
+        } catch (err) {
+            try { await conn.rollback(); } catch (_rollbackErr) { }
+            conn.release();
+            return res.status(500).json({ message: err.message });
+        }
+        conn.release();
+
+        await dbPromise.execute(
+            "INSERT INTO vendors (id, user_id, linked_profile_id, counterparty_id, vendor_name, email) VALUES (?, ?, ?, ?, ?, ?)",
+            [legacyId, req.user.id, linked_profile_id, counterparty.id, vendorName, profile.email || null]
+        );
+        const [rows] = await dbPromise.execute("SELECT * FROM vendors WHERE id = ?", [legacyId]);
+        return res.status(201).json(rows[0]);
+    } catch (err) {
+        return res.status(500).json({ message: err.message });
+    }
 });
 
 app.delete("/api/vendors/:id", authenticate, (req, res) => {
@@ -1772,12 +2239,19 @@ app.delete("/api/vendors/:id", authenticate, (req, res) => {
 // KYC
 // ===========================================================
 
-app.get("/api/kyc/status", authenticate, (req, res) => {
-    db.query("SELECT * FROM kyc_status WHERE user_id = ?",
-        [req.user.id], (err, rows) => {
-            if (err) return res.status(500).json({ message: err.message });
-            res.json(rows[0] || { status: "pending" });
-        });
+app.get("/api/kyc/status", authenticate, async (req, res) => {
+    const conn = await accountingPool.getConnection();
+    try {
+        const [rows] = await conn.execute(
+            "SELECT * FROM kyc_status WHERE user_id = ?",
+            [req.user.id]
+        );
+        res.json(rows[0] || { status: "pending" });
+    } catch (err) {
+        res.status(500).json({ message: err.message });
+    } finally {
+        conn.release();
+    }
 });
 
 app.post("/api/kyc/upload", authenticate, upload.single("file"), (req, res) => {
@@ -1861,16 +2335,28 @@ app.put("/api/kyc/admin/reject/:documentId", authenticateAdmin, (req, res) => {
 // ADMIN ROUTES
 // ===========================================================
 
-// Admin Login
-app.post("/api/admin/login", (req, res) => {
+// Admin Login (use connection pool — shared `db` connection is unsafe under concurrent requests)
+app.post("/api/admin/login", async (req, res) => {
     const { email, password } = req.body;
     const requestMeta = getRequestMeta(req);
     if (!email || !password)
         return res.status(400).json({ message: "Email and password are required" });
 
+    if (!JWT_SECRET) {
+        console.error("[admin_login] JWT_SECRET is not set");
+        return res.status(500).json({
+            message: NODE_ENV === "production" ? "Login error" : "Server misconfiguration: set JWT_SECRET in .env",
+        });
+    }
+
     const normalEmail = email.toLowerCase().trim();
-    db.query("SELECT * FROM profiles WHERE email = ? AND is_admin = 1", [normalEmail], (err, rows) => {
-        if (err) return res.status(500).json({ message: "Login error" });
+
+    try {
+        const [rows] = await accountingPool.execute(
+            "SELECT * FROM profiles WHERE email = ? AND is_admin = 1",
+            [normalEmail]
+        );
+
         if (!rows.length) {
             auditService.logAction({
                 entityType: "auth_session",
@@ -1887,47 +2373,51 @@ app.post("/api/admin/login", (req, res) => {
         }
 
         const user = rows[0];
-        bcrypt.compare(String(password).trim(), user.password_hash, (cmpErr, match) => {
-            if (cmpErr || !match) {
-                auditService.logAction({
-                    actorUserId: user.id,
-                    companyId: user.id,
-                    entityType: "auth_session",
-                    entityId: user.id,
-                    actionType: "login",
-                    reason: "Invalid admin credentials",
-                    newValues: { email: user.email, outcome: "invalid_password", is_admin: true },
-                    ipAddress: requestMeta.ipAddress,
-                    userAgent: requestMeta.userAgent,
-                    route: requestMeta.route,
-                    method: requestMeta.method,
-                    statusCode: 401,
-                }).catch(() => { });
-                return res.status(401).json({ message: "Invalid credentials" });
-            }
-
-            const token = jwt.sign(
-                { id: user.id, email: user.email, is_admin: true },
-                JWT_SECRET,
-                { expiresIn: "8h" }
-            );
+        const hash = String(user.password_hash || "");
+        const match = bcrypt.compareSync(String(password).trim(), hash);
+        if (!match) {
             auditService.logAction({
                 actorUserId: user.id,
                 companyId: user.id,
                 entityType: "auth_session",
                 entityId: user.id,
                 actionType: "login",
-                reason: "Admin login successful",
-                newValues: { email: user.email, outcome: "success", is_admin: true },
+                reason: "Invalid admin credentials",
+                newValues: { email: user.email, outcome: "invalid_password", is_admin: true },
                 ipAddress: requestMeta.ipAddress,
                 userAgent: requestMeta.userAgent,
                 route: requestMeta.route,
                 method: requestMeta.method,
-                statusCode: 200,
+                statusCode: 401,
             }).catch(() => { });
-            res.json({ message: "Admin login successful", token });
-        });
-    });
+            return res.status(401).json({ message: "Invalid credentials" });
+        }
+
+        const token = jwt.sign(
+            { id: user.id, email: user.email, is_admin: true },
+            JWT_SECRET,
+            { expiresIn: "8h" }
+        );
+        auditService.logAction({
+            actorUserId: user.id,
+            companyId: user.id,
+            entityType: "auth_session",
+            entityId: user.id,
+            actionType: "login",
+            reason: "Admin login successful",
+            newValues: { email: user.email, outcome: "success", is_admin: true },
+            ipAddress: requestMeta.ipAddress,
+            userAgent: requestMeta.userAgent,
+            route: requestMeta.route,
+            method: requestMeta.method,
+            statusCode: 200,
+        }).catch(() => { });
+        return res.json({ message: "Admin login successful", token });
+    } catch (err) {
+        console.error("[admin_login]", err.code || "", err.message);
+        // Always return DB/parser detail here — admin-only route; avoids opaque "Login error" when npm sets NODE_ENV=production.
+        return res.status(500).json({ message: err.message || "Login error" });
+    }
 });
 
 // Admin Verify (checks token is valid and has admin flag)
@@ -2009,17 +2499,25 @@ app.put("/api/admin/kyc/reject/:userId", authenticateAdmin, (req, res) => {
 const ADMIN_SEED_SECRET = process.env.ADMIN_SEED_SECRET || "finflow_seed";
 
 app.post("/api/admin/seed", (req, res) => {
-    auditService.logAction({
-        entityType: "admin_seed",
-        actionType: "create",
-        reason: "Attempted use of disabled admin seed endpoint",
-        newValues: { email: req.body?.email || null },
-        ipAddress: getRequestMeta(req).ipAddress,
-        userAgent: getRequestMeta(req).userAgent,
-        route: getRequestMeta(req).route,
-        method: getRequestMeta(req).method,
-    }).catch(() => { });
-    return res.status(410).json({ message: "Admin seed endpoint disabled in production-hardening mode" });
+    const allowAdminSeed =
+        String(process.env.ALLOW_ADMIN_SEED || "").toLowerCase() === "true" ||
+        NODE_ENV !== "production";
+
+    if (!allowAdminSeed) {
+        auditService.logAction({
+            entityType: "admin_seed",
+            actionType: "create",
+            reason: "Admin seed blocked in production",
+            newValues: { email: req.body?.email || null },
+            ipAddress: getRequestMeta(req).ipAddress,
+            userAgent: getRequestMeta(req).userAgent,
+            route: getRequestMeta(req).route,
+            method: getRequestMeta(req).method,
+        }).catch(() => { });
+        return res.status(403).json({
+            message: "Admin seed is disabled in production. Set ALLOW_ADMIN_SEED=true temporarily if you must bootstrap an admin.",
+        });
+    }
 
     const { secret, email, password, name } = req.body;
 
@@ -2070,7 +2568,13 @@ app.post("/api/admin/seed", (req, res) => {
 // ===========================================================
 // HEALTH CHECK
 // ===========================================================
-app.get("/api/health", (req, res) => res.json({ status: "ok", timestamp: new Date() }));
+app.get("/api/health", (req, res) =>
+  res.json({
+    status: "ok",
+    timestamp: new Date().toISOString(),
+    accounting: { sales_invoice_service: SALES_INVOICE_SERVICE_BUILD_ID },
+  })
+);
 
 // ===========================================================
 // FALLBACK & ERROR HANDLERS
@@ -2079,15 +2583,21 @@ app.use((req, res) => res.status(404).json({ message: `Route ${req.method} ${req
 
 app.use((err, req, res, _next) => {
     console.error("Server error:", err.message);
+    if (err.stack) console.error(err.stack);
     res.status(500).json({ message: err.message || "Internal server error" });
 });
 
 // ===========================================================
-// START
+// START (after first DB init pass — avoids requests before schema/migrations)
 // ===========================================================
-app.listen(PORT, () => {
-    console.log(`? FinFlow backend running on http://localhost:${PORT}`);
-    console.log(`   Health: http://localhost:${PORT}/api/health`);
-    const emailStatus = getEmailConfigStatus();
-    console.log(`   Email verification: ${emailStatus.configured ? "configured" : "not configured"} (${emailStatus.provider})`);
-});
+let httpServerStarted = false;
+function startHttpServer() {
+    if (httpServerStarted) return;
+    httpServerStarted = true;
+    app.listen(PORT, () => {
+        console.log(`? FinFlow backend running on http://localhost:${PORT}`);
+        console.log(`   Health: http://localhost:${PORT}/api/health`);
+        const emailStatus = getEmailConfigStatus();
+        console.log(`   Email verification: ${emailStatus.configured ? "configured" : "not configured"} (${emailStatus.provider})`);
+    });
+}

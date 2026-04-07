@@ -10,6 +10,7 @@ import { Shield, LogIn, UserPlus } from "lucide-react";
 import { toast } from "sonner";
 import { useAuth } from "@/contexts/AuthContext";
 import { KYCDocumentUpload } from "@/components/KYC/KYCDocumentUpload";
+import { apiUrl } from "@/config/apiOrigin";
 
 const API_BASE = "";
 
@@ -432,16 +433,28 @@ export const AdminLogin = () => {
     setIsLoading(true);
 
     try {
-      const response = await fetch(`${API_BASE}/api/admin/login`, {
+      const response = await fetch(apiUrl("/api/admin/login"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ email, password }),
       });
 
-      const data = await response.json();
+      const raw = await response.text();
+      let data: { message?: string; token?: string } = {};
+      try {
+        data = raw ? JSON.parse(raw) : {};
+      } catch {
+        toast.error(`Login failed (${response.status}). Is the API running on port 5000?`);
+        return;
+      }
 
       if (!response.ok) {
         toast.error(data.message || "Invalid credentials");
+        return;
+      }
+
+      if (!data.token) {
+        toast.error("Login succeeded but no token was returned");
         return;
       }
 
@@ -449,7 +462,7 @@ export const AdminLogin = () => {
       toast.success("Admin login successful");
       navigate("/admin");
     } catch {
-      toast.error("An error occurred during login");
+      toast.error("Network error — check that the dev server proxy can reach the backend");
     } finally {
       setIsLoading(false);
     }
@@ -500,6 +513,15 @@ export const AdminLogin = () => {
 
           <p className="mt-6 text-xs text-center text-muted-foreground">
             This admin portal is for KYC verification purposes only.
+          </p>
+          <p className="mt-3 text-xs text-center text-muted-foreground max-w-sm mx-auto leading-relaxed">
+            First login on a fresh database? With the backend running in development, create an admin by sending{" "}
+            <code className="rounded bg-muted px-1 py-0.5 text-[10px]">POST /api/admin/seed</code> with JSON{" "}
+            <code className="rounded bg-muted px-1 py-0.5 text-[10px]">secret</code> (default{" "}
+            <code className="rounded bg-muted px-1 py-0.5 text-[10px]">finflow_seed</code>),{" "}
+            <code className="rounded bg-muted px-1 py-0.5 text-[10px]">email</code>,{" "}
+            <code className="rounded bg-muted px-1 py-0.5 text-[10px]">password</code>, and optional{" "}
+            <code className="rounded bg-muted px-1 py-0.5 text-[10px]">name</code>.
           </p>
         </CardContent>
       </Card>

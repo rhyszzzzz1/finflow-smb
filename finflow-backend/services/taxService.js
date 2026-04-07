@@ -1,11 +1,15 @@
 "use strict";
 
 class TaxService {
-  constructor(pool) {
+  constructor(pool, options = {}) {
     if (!pool) {
       throw new Error("TaxService requires a mysql2/promise pool");
     }
+    if (!options.counterpartyService) {
+      throw new Error("TaxService requires a counterpartyService");
+    }
     this.pool = pool;
+    this.counterpartyService = options.counterpartyService;
   }
 
   async queryAll(conn, sql, params = []) {
@@ -80,16 +84,7 @@ class TaxService {
   }
 
   async resolveCompanyId(conn, actorUserId) {
-    const company = await this.queryOne(
-      conn,
-      `SELECT id
-         FROM companies
-        WHERE legacy_profile_id = ?
-           OR owner_profile_id = ?
-        LIMIT 1`,
-      [actorUserId, actorUserId]
-    ).catch(() => null);
-    return company?.id || actorUserId;
+    return this.counterpartyService.resolveCompanyId(conn, actorUserId);
   }
 
   async getTaxCodeById(conn, actorUserId, taxCodeId) {
@@ -221,7 +216,7 @@ class TaxService {
           taxCode.id,
           header.id,
           line.id,
-          header.customer_id || null,
+          header.counterparty_id || header.customer_id || null,
           header.customer_name || null,
           header.invoice_no,
           header.invoice_date,
@@ -254,10 +249,72 @@ class TaxService {
           taxCode.id,
           header.id,
           line.id,
-          header.vendor_id || null,
+          header.counterparty_id || header.vendor_id || null,
           header.vendor_name || null,
           header.bill_no,
           header.bill_date,
+          taxableAmount,
+          taxAmount,
+          postedJournalEntryId || null,
+        ]
+      );
+    }
+  }
+
+  async recordTaxTransactionsForSalesCreditNote(conn, actorUserId, payload) {
+    const { companyId, header, lines, postedJournalEntryId } = payload;
+    for (const line of lines) {
+      const taxCode = line.tax_code_id ? await this.getTaxCodeById(conn, actorUserId, line.tax_code_id) : null;
+      if (!taxCode) continue;
+
+      const taxableAmount = this.money(-Math.abs(Number(line.taxable_amount || line.line_subtotal || 0)));
+      const taxAmount = this.money(-Math.abs(Number(line.line_tax_amount || 0)));
+
+      await conn.execute(
+        `INSERT INTO tax_transactions
+          (id, company_id, tax_code_id, source_type, source_id, source_line_id, tax_direction, counterparty_id, counterparty_name,
+           document_number, transaction_date, taxable_amount, tax_amount, posted_journal_entry_id)
+         VALUES (UUID(), ?, ?, 'sales_credit_note_line', ?, ?, 'output', ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          companyId,
+          taxCode.id,
+          header.id,
+          line.id,
+          header.counterparty_id || header.customer_id || null,
+          header.customer_name || null,
+          header.credit_note_number,
+          header.credit_note_date,
+          taxableAmount,
+          taxAmount,
+          postedJournalEntryId || null,
+        ]
+      );
+    }
+  }
+
+  async recordTaxTransactionsForPurchaseDebitNote(conn, actorUserId, payload) {
+    const { companyId, header, lines, postedJournalEntryId } = payload;
+    for (const line of lines) {
+      const taxCode = line.tax_code_id ? await this.getTaxCodeById(conn, actorUserId, line.tax_code_id) : null;
+      if (!taxCode) continue;
+
+      const taxableAmount = this.money(-Math.abs(Number(line.taxable_amount || line.line_subtotal || 0)));
+      const taxAmount = this.money(-Math.abs(Number(line.line_tax_amount || 0)));
+
+      await conn.execute(
+        `INSERT INTO tax_transactions
+          (id, company_id, tax_code_id, source_type, source_id, source_line_id, tax_direction, counterparty_id, counterparty_name,
+           document_number, transaction_date, taxable_amount, tax_amount, posted_journal_entry_id)
+         VALUES (UUID(), ?, ?, 'purchase_debit_note_line', ?, ?, 'input', ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          companyId,
+          taxCode.id,
+          header.id,
+          line.id,
+          header.counterparty_id || header.vendor_id || null,
+          header.vendor_name || null,
+          header.debit_note_number,
+          header.debit_note_date,
           taxableAmount,
           taxAmount,
           postedJournalEntryId || null,

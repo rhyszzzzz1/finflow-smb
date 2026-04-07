@@ -2,6 +2,13 @@
 
 const LEGACY_TABLES = ["invoices", "purchases", "sales", "receivables", "payables"];
 
+// NOTE(accounting-refactor): this guard intentionally targets legacy
+// accounting/derived-balance tables only. It does not currently block writes
+// to the transitional `inventory` table because that table still acts as a
+// compatibility metadata projection while stock authority has moved to
+// `stock_movements`. If inventory compatibility writes are retired later,
+// expand this guard in the same explicit way instead of silently broadening it.
+
 function detectLegacyWriteTable(sql) {
   if (typeof sql !== "string") return null;
 

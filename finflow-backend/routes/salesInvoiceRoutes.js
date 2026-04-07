@@ -3,7 +3,10 @@
 const express = require("express");
 const { asyncHandler } = require("../utils/asyncHandler");
 const { validateRequest } = require("../middleware/validateRequest");
-const { validateSalesInvoicePayload } = require("../validators/salesInvoiceValidator");
+const {
+  validateSalesInvoicePayload,
+  validateApprovalDecisionPayload,
+} = require("../validators/salesInvoiceValidator");
 
 function createSalesInvoiceRoutes({ authenticate, salesInvoiceController }) {
   const router = express.Router();
@@ -29,7 +32,31 @@ function createSalesInvoiceRoutes({ authenticate, salesInvoiceController }) {
     asyncHandler(salesInvoiceController.updateDraft)
   );
 
+  router.post(
+    "/sales-invoices/:id/submit",
+    authenticate,
+    validateRequest({
+      customBodyValidator: (body) => validateApprovalDecisionPayload(body),
+    }),
+    asyncHandler(salesInvoiceController.submitForApproval)
+  );
   router.post("/sales-invoices/:id/approve", authenticate, asyncHandler(salesInvoiceController.approve));
+  router.post(
+    "/sales-invoices/:id/reject",
+    authenticate,
+    validateRequest({
+      customBodyValidator: (body) => validateApprovalDecisionPayload(body, { requireComment: true }),
+    }),
+    asyncHandler(salesInvoiceController.reject)
+  );
+  router.post(
+    "/sales-invoices/:id/resubmit",
+    authenticate,
+    validateRequest({
+      customBodyValidator: (body) => validateApprovalDecisionPayload(body),
+    }),
+    asyncHandler(salesInvoiceController.resubmit)
+  );
   router.post("/sales-invoices/:id/post", authenticate, asyncHandler(salesInvoiceController.post));
   router.post("/sales-invoices/:id/void", authenticate, asyncHandler(salesInvoiceController.void));
 

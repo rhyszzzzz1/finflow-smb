@@ -1,19 +1,55 @@
 "use strict";
 
 const crypto = require("crypto");
+const { sqlParams } = require("../utils/sqlParams");
+
+/**
+ * Coerces mysql2 DATE / JS Date / ISO-ish strings to `YYYY-MM-DD` for fiscal logic and JE numbering.
+ * Prevents `String(new Date())` prefixes like `JE-Sun Apr 05 2026...` that blow VARCHAR(30)/(50) limits
+ * and collide after truncation (duplicate uq_entry_no_user).
+ * @param {string|Date} entryDate
+ * @returns {string}
+ */
+function normalizeEntryDateForAccounting(entryDate) {
+  if (entryDate == null || entryDate === "") {
+    throw new Error("entryDate is required");
+  }
+  if (entryDate instanceof Date) {
+    if (Number.isNaN(entryDate.getTime())) throw new Error("Invalid entryDate");
+    const y = entryDate.getUTCFullYear();
+    const m = String(entryDate.getUTCMonth() + 1).padStart(2, "0");
+    const d = String(entryDate.getUTCDate()).padStart(2, "0");
+    return `${y}-${m}-${d}`;
+  }
+  const s = String(entryDate).trim();
+  const isoHead = s.match(/^(\d{4}-\d{2}-\d{2})/);
+  if (isoHead) return isoHead[1];
+  const parsed = new Date(s);
+  if (!Number.isNaN(parsed.getTime())) {
+    const y = parsed.getUTCFullYear();
+    const m = String(parsed.getUTCMonth() + 1).padStart(2, "0");
+    const d = String(parsed.getUTCDate()).padStart(2, "0");
+    return `${y}-${m}-${d}`;
+  }
+  throw new Error(`Unparseable entryDate: ${s.slice(0, 80)}`);
+}
 
 class AccountingControlService {
   constructor(pool, options = {}) {
     if (!pool) {
       throw new Error("AccountingControlService requires a mysql2/promise pool");
     }
+    if (!options.counterpartyService) {
+      throw new Error("AccountingControlService requires a counterpartyService");
+    }
     this.pool = pool;
+    this.counterpartyService = options.counterpartyService;
     this.allowSoftLockedBackdatedPosting = Boolean(options.allowSoftLockedBackdatedPosting);
   }
 
   async queryAll(conn, sql, params = []) {
     const executor = conn || this.pool;
-    const [rows] = await executor.execute(sql, params);
+    const [rows] = await executor.execute(sql, sqlParams(params));
     return rows;
   }
 
@@ -47,7 +83,7 @@ class AccountingControlService {
         id VARCHAR(36) PRIMARY KEY,
         company_id VARCHAR(36) NOT NULL,
         fiscal_period_id VARCHAR(36) NULL,
-        document_type ENUM('sales_invoice','sales_credit_note','purchase_bill','payment','journal_entry') NOT NULL,
+        document_type VARCHAR(64) NOT NULL,
         prefix VARCHAR(30) NOT NULL,
         next_number BIGINT UNSIGNED NOT NULL DEFAULT 1,
         reset_rule ENUM('never','yearly','period') NOT NULL DEFAULT 'yearly',
@@ -59,7 +95,8 @@ class AccountingControlService {
       `,
       `ALTER TABLE fiscal_periods MODIFY COLUMN status ENUM('open','soft_locked','closed') NOT NULL DEFAULT 'open'`,
       `ALTER TABLE fiscal_periods ADD COLUMN IF NOT EXISTS allow_backdated_posting TINYINT(1) NOT NULL DEFAULT 0`,
-      `ALTER TABLE document_sequences MODIFY COLUMN document_type ENUM('sales_invoice','sales_credit_note','purchase_bill','payment','journal_entry') NOT NULL`,
+      `ALTER TABLE document_sequences MODIFY COLUMN document_type VARCHAR(64) NOT NULL`,
+      `ALTER TABLE document_sequences MODIFY COLUMN prefix VARCHAR(64) NOT NULL`,
     ];
 
     for (const sql of statements) {
@@ -72,19 +109,11 @@ class AccountingControlService {
   }
 
   async resolveCompanyId(conn, actorUserId) {
-    const company = await this.queryOne(
-      conn,
-      `SELECT id
-         FROM companies
-        WHERE legacy_profile_id = ?
-           OR owner_profile_id = ?
-        LIMIT 1`,
-      [actorUserId, actorUserId]
-    ).catch(() => null);
-    return company?.id || actorUserId;
+    return this.counterpartyService.resolveCompanyId(conn, actorUserId);
   }
 
   async ensureFiscalPeriodForDate(conn, companyId, entryDate) {
+    const entryDateNorm = normalizeEntryDateForAccounting(entryDate);
     const existing = await this.queryOne(
       conn,
       `SELECT *
@@ -94,14 +123,14 @@ class AccountingControlService {
         ORDER BY start_date DESC
         LIMIT 1
         FOR UPDATE`,
-      [companyId, entryDate]
+      [companyId, entryDateNorm]
     );
 
     if (existing) {
       return existing;
     }
 
-    const year = String(entryDate).slice(0, 4);
+    const year = entryDateNorm.slice(0, 4);
     const id = crypto.randomUUID();
     const created = {
       id,
@@ -117,7 +146,7 @@ class AccountingControlService {
       `INSERT INTO fiscal_periods
         (id, company_id, period_name, start_date, end_date, status, allow_backdated_posting)
        VALUES (?, ?, ?, ?, ?, 'open', 0)`,
-      [created.id, created.company_id, created.period_name, created.start_date, created.end_date]
+      sqlParams([created.id, created.company_id, created.period_name, created.start_date, created.end_date])
     );
 
     return created;
@@ -144,18 +173,34 @@ class AccountingControlService {
       throw new Error("companyId, documentType, and entryDate are required");
     }
 
-    const period = await this.ensureFiscalPeriodForDate(conn, companyId, entryDate);
-    const year = String(entryDate).slice(0, 4);
-    const yyyymmdd = String(entryDate).replace(/-/g, "");
+    const entryDateNorm = normalizeEntryDateForAccounting(entryDate);
+    const period = await this.ensureFiscalPeriodForDate(conn, companyId, entryDateNorm);
+    const year = entryDateNorm.slice(0, 4);
+    const yyyymmdd = entryDateNorm.replace(/-/g, "");
     const defaultPrefixes = {
       sales_invoice: `SI-${year}-`,
+      sales_quote: `SQ-${year}-`,
+      sales_order: `SO-${year}-`,
       sales_credit_note: `SCN-${year}-`,
       purchase_bill: `PB-${year}-`,
+      purchase_order: `PO-${year}-`,
+      purchase_debit_note: `PDN-${year}-`,
+      goods_receipt: `GR-${year}-`,
       payment: `PAY-${year}-`,
       journal_entry: `JE-${yyyymmdd}-`,
     };
-    const resolvedPrefix = prefix || defaultPrefixes[documentType];
-    const scopedFiscalPeriodId = resetRule === "period" ? period.id : null;
+    let resolvedPrefix = prefix || defaultPrefixes[documentType];
+    if (documentType === "journal_entry") {
+      resolvedPrefix = `JE-${yyyymmdd}-`;
+    }
+    if (!resolvedPrefix) {
+      const slug = String(documentType || "DOC")
+        .toUpperCase()
+        .replace(/[^A-Z0-9]+/g, "")
+        .slice(0, 6) || "DOC";
+      resolvedPrefix = `${slug}-${year}-`;
+    }
+    const scopedFiscalPeriodId = resetRule === "period" ? (period.id ?? null) : null;
 
     let sequence = await this.queryOne(
       conn,
@@ -179,7 +224,7 @@ class AccountingControlService {
         `INSERT INTO document_sequences
           (id, company_id, fiscal_period_id, document_type, prefix, next_number, reset_rule, is_active)
          VALUES (?, ?, ?, ?, ?, 1, ?, 1)`,
-        [sequence.id, companyId, scopedFiscalPeriodId, documentType, resolvedPrefix, resetRule]
+        sqlParams([sequence.id, companyId, scopedFiscalPeriodId, documentType, resolvedPrefix, resetRule])
       );
     }
 
@@ -189,17 +234,24 @@ class AccountingControlService {
           SET next_number = ?,
               updated_at = CURRENT_TIMESTAMP
         WHERE id = ?`,
-      [nextNumber + 1, sequence.id]
+      sqlParams([nextNumber + 1, sequence.id])
     );
 
     return {
       sequenceId: sequence.id,
-      fiscalPeriodId: period.id,
+      fiscalPeriodId: period.id ?? null,
       documentNumber: `${resolvedPrefix}${String(nextNumber).padStart(6, "0")}`,
+      entryDate: entryDateNorm,
     };
+  }
+
+  /** @param {string|Date} entryDate */
+  normalizeEntryDate(entryDate) {
+    return normalizeEntryDateForAccounting(entryDate);
   }
 }
 
 module.exports = {
   AccountingControlService,
+  normalizeEntryDateForAccounting,
 };

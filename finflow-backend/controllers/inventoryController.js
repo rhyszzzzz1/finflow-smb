@@ -33,11 +33,16 @@ class InventoryController {
   };
 
   create = async (req, res) => {
+    // COMPATIBILITY(accounting-refactor): this creates/bridges a legacy
+    // inventory-shaped record for UI compatibility. It must not be interpreted
+    // as establishing stock on hand.
     const row = await this.inventoryService.createInventory(req.user.id, req.body);
     return res.status(201).json(row);
   };
 
   update = async (req, res) => {
+    // COMPATIBILITY(accounting-refactor): metadata-only update. Quantity on hand
+    // is authoritative in stock_movements, not here.
     const row = await this.inventoryService.updateInventory(req.user.id, req.params.id, req.body);
     if (!row) {
       return res.status(404).json({ message: "Item not found" });
@@ -66,6 +71,21 @@ class InventoryController {
   createItem = async (req, res) => {
     const row = await this.inventoryService.createItem(req.user.id, req.body);
     return res.status(201).json(row);
+  };
+
+  listItemVendorLinks = async (req, res) => {
+    const rows = await this.inventoryService.listItemVendorLinks(req.user.id, req.params.itemId);
+    return res.json(rows);
+  };
+
+  linkVendorToItem = async (req, res) => {
+    const row = await this.inventoryService.linkVendorToItem(req.user.id, req.params.itemId, req.body);
+    return res.status(201).json(row);
+  };
+
+  markPreferredVendor = async (req, res) => {
+    const row = await this.inventoryService.markPreferredVendor(req.user.id, req.params.itemId, req.params.linkId);
+    return res.json(row);
   };
 
   listWarehouses = async (req, res) => {

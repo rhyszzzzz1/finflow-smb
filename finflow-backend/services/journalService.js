@@ -18,6 +18,7 @@ class JournalService {
   static get SOURCE_TYPES() {
     return [
       "sales_invoice",
+      "goods_receipt",
       "sales_credit_note",
       "purchase_bill",
       "purchase_debit_note",
@@ -65,6 +66,13 @@ class JournalService {
           { accountCode: "1200-INVENTORY", debit: 1000.0, credit: 0 },
           { accountCode: "1300-TAX-IN", debit: 130.0, credit: 0 },
           { accountCode: "2100-AP", debit: 0, credit: 1130.0 },
+        ],
+      },
+      goods_receipt: {
+        memo: "Post goods receipt GR-0001",
+        lines: [
+          { accountCode: "1200-INVENTORY", debit: 1000.0, credit: 0 },
+          { accountCode: "2150-GRNI", debit: 0, credit: 1000.0 },
         ],
       },
       purchase_debit_note: {
@@ -133,6 +141,13 @@ class JournalService {
   async queryAll(conn, sql, params = []) {
     const [rows] = await conn.execute(sql, params);
     return rows;
+  }
+
+  runInScope(conn, work) {
+    if (conn) {
+      return work(conn);
+    }
+    return this.withTransaction(work);
   }
 
   async ensureSchema() {
@@ -226,6 +241,8 @@ class JournalService {
       `ALTER TABLE journal_entries ADD COLUMN IF NOT EXISTS company_id VARCHAR(36) NULL`,
       `ALTER TABLE journal_entries ADD COLUMN IF NOT EXISTS fiscal_period_id VARCHAR(36) NULL`,
       `ALTER TABLE journal_entries ADD COLUMN IF NOT EXISTS entry_number VARCHAR(50) NULL`,
+      `ALTER TABLE journal_entries MODIFY COLUMN entry_no VARCHAR(80) NOT NULL`,
+      `ALTER TABLE journal_entries MODIFY COLUMN entry_number VARCHAR(80) NULL`,
       `ALTER TABLE journal_entries ADD COLUMN IF NOT EXISTS posting_status ENUM('draft','posted','reversed') NOT NULL DEFAULT 'draft'`,
       `ALTER TABLE journal_entries ADD COLUMN IF NOT EXISTS created_by_user_id VARCHAR(36) NULL`,
       `ALTER TABLE journal_entries ADD COLUMN IF NOT EXISTS posted_by_user_id VARCHAR(36) NULL`,
@@ -299,7 +316,12 @@ class JournalService {
         LIMIT 1`,
       [companyId, line.accountCode]
     );
-    if (!account) throw new Error(`Account not found for code: ${line.accountCode}`);
+    if (!account) {
+      throw new Error(
+        `Account not found for code: ${line.accountCode}. ` +
+          "Default chart-of-accounts rows may be missing for this company. Restart the backend (it seeds defaults on startup) or run: npm run seed:coa --prefix finflow-backend"
+      );
+    }
     if (!account.is_active) throw new Error(`Account is inactive for code: ${line.accountCode}`);
     if (!account.allow_posting) throw new Error(`Account does not allow posting for code: ${line.accountCode}`);
     return account.id;
@@ -411,6 +433,7 @@ class JournalService {
       createdByUserId = null,
       lines = [],
       requestMeta = {},
+      conn = null,
     } = payload;
 
     if (!companyId) throw new Error("companyId is required");
@@ -418,18 +441,18 @@ class JournalService {
     this.assertValidSourceType(sourceType);
     this.validateJournalBalance(lines);
 
-    return this.withTransaction(async (conn) => {
-      const period = await this.accountingControlService.validatePostingDate(conn, companyId, entryDate);
-      const numbering = await this.accountingControlService.nextDocumentNumber(conn, {
+    return this.runInScope(conn, async (activeConn) => {
+      const period = await this.accountingControlService.validatePostingDate(activeConn, companyId, entryDate);
+      const numbering = await this.accountingControlService.nextDocumentNumber(activeConn, {
         companyId,
         documentType: "journal_entry",
         entryDate,
-        prefix: `JE-${String(entryDate).replace(/-/g, "")}-`,
         resetRule: "never",
       });
+      const entryDateSql = numbering.entryDate || this.accountingControlService.normalizeEntryDate(entryDate);
       const journalEntryId = crypto.randomUUID();
 
-      await conn.execute(
+      await activeConn.execute(
         `INSERT INTO journal_entries
           (id, company_id, fiscal_period_id, user_id, entry_number, entry_no, entry_date, source_type, source_id, posting_status, status, memo, created_by_user_id)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'draft', 'posted', ?, ?)`,
@@ -440,7 +463,7 @@ class JournalService {
           createdByUserId,
           numbering.documentNumber,
           numbering.documentNumber,
-          entryDate,
+          entryDateSql,
           sourceType,
           sourceId,
           memo,
@@ -448,21 +471,21 @@ class JournalService {
         ]
       );
 
-      await this.createJournalLines(conn, {
+      await this.createJournalLines(activeConn, {
         companyId,
         journalEntryId,
         lines,
       });
 
       const entry = await this.queryOne(
-        conn,
+        activeConn,
         `SELECT *
            FROM journal_entries
           WHERE id = ?`,
         [journalEntryId]
       );
 
-      await this.insertAuditLog(conn, {
+      await this.insertAuditLog(activeConn, {
         companyId,
         actorUserId: createdByUserId,
         entityType: "journal_entry",
@@ -542,15 +565,16 @@ class JournalService {
       journalEntryId,
       actorUserId = null,
       requestMeta = {},
+      conn = null,
     } = params;
 
     if (!companyId || !journalEntryId) {
       throw new Error("companyId and journalEntryId are required");
     }
 
-    return this.withTransaction(async (conn) => {
+    return this.runInScope(conn, async (activeConn) => {
       const entry = await this.queryOne(
-        conn,
+        activeConn,
         `SELECT *
            FROM journal_entries
           WHERE id = ?
@@ -565,7 +589,7 @@ class JournalService {
       }
 
       const lines = await this.queryAll(
-        conn,
+        activeConn,
         `SELECT jl.*, coa.account_code
            FROM journal_lines jl
            JOIN chart_of_accounts coa ON coa.id = jl.account_id
@@ -581,7 +605,7 @@ class JournalService {
         }))
       );
 
-      await conn.execute(
+      await activeConn.execute(
         `UPDATE journal_entries
             SET posting_status = 'posted',
                 status = 'posted',
@@ -593,14 +617,14 @@ class JournalService {
       );
 
       const posted = await this.queryOne(
-        conn,
+        activeConn,
         `SELECT *
            FROM journal_entries
           WHERE id = ?`,
         [journalEntryId]
       );
 
-      await this.insertAuditLog(conn, {
+      await this.insertAuditLog(activeConn, {
         companyId,
         actorUserId,
         entityType: "journal_entry",
@@ -674,9 +698,9 @@ class JournalService {
         companyId,
         documentType: "journal_entry",
         entryDate: postDate,
-        prefix: `JE-${String(postDate).replace(/-/g, "")}-`,
         resetRule: "never",
       });
+      const postDateSql = reversalNumbering.entryDate || this.accountingControlService.normalizeEntryDate(postDate);
 
       await conn.execute(
         `INSERT INTO journal_entries
@@ -689,7 +713,7 @@ class JournalService {
           actorUserId,
           reversalNumbering.documentNumber,
           reversalNumbering.documentNumber,
-          postDate,
+          postDateSql,
           original.source_type,
           original.source_id,
           `Reversal of ${original.entry_number}: ${reason}`,

@@ -20,21 +20,102 @@ export interface InventoryItem {
   updated_at: string;
 }
 
+export interface ItemMaster {
+  id: string;
+  name: string;
+  sku?: string | null;
+  item_type?: string | null;
+}
+
+export interface Warehouse {
+  id: string;
+  name: string;
+  code?: string | null;
+}
+
+export interface StockBalance {
+  item_id: string;
+  item_name: string;
+  warehouse_id?: string | null;
+  warehouse_name?: string | null;
+  quantity_on_hand: number;
+  on_hand_value: number;
+}
+
 export const useInventory = () => {
   const [inventory, setInventory] = useState<InventoryItem[]>([]);
+  const [items, setItems] = useState<ItemMaster[]>([]);
+  const [warehouses, setWarehouses] = useState<Warehouse[]>([]);
+  const [stockBalances, setStockBalances] = useState<StockBalance[]>([]);
   const [isLoading, setIsLoading] = useState(true);
 
   const fetchInventory = async () => {
     try {
-      const data = await inventoryApi.getAll();
-      const rows = Array.isArray(data) ? data : data.data || [];
-      setInventory(rows.map((item: any) => ({
-        ...item,
-        stock_quantity: Number(item.stock_quantity) || 0,
-        purchase_price: Number(item.purchase_price) || 0,
-        selling_price: Number(item.selling_price) || 0,
-        tax_rate: Number(item.tax_rate) || 0,
-      })));
+      const [invR, itemsR, whR, stockR] = await Promise.allSettled([
+        inventoryApi.getAll(),
+        inventoryApi.getItems(),
+        inventoryApi.getWarehouses(),
+        inventoryApi.getStockBalances(),
+      ]);
+
+      const unwrap = (result: PromiseSettledResult<any>, label: string) => {
+        if (result.status === "fulfilled") return result.value;
+        console.error(`Inventory fetch failed (${label}):`, result.reason);
+        return null;
+      };
+
+      const data = unwrap(invR, "legacy list");
+      const itemRows = unwrap(itemsR, "items");
+      const warehouseRows = unwrap(whR, "warehouses");
+      const stockRows = unwrap(stockR, "stock balances");
+
+      if (!data && !itemRows && !warehouseRows && !stockRows) {
+        toast.error("Failed to load inventory");
+        return;
+      }
+
+      if (data) {
+        const rows = Array.isArray(data) ? data : data.data || [];
+        setInventory(rows.map((item: any) => ({
+          ...item,
+          stock_quantity: Number(item.stock_quantity) || 0,
+          purchase_price: Number(item.purchase_price) || 0,
+          selling_price: Number(item.selling_price) || 0,
+          tax_rate: Number(item.tax_rate) || 0,
+        })));
+      }
+
+      if (itemRows) {
+        const normalizedItems = Array.isArray(itemRows) ? itemRows : itemRows?.data || [];
+        setItems(normalizedItems.map((item: any) => ({
+          ...item,
+          name: item.name || item.product_name || item.description || "Unnamed Item",
+        })));
+      }
+
+      if (warehouseRows) {
+        const normalizedWarehouses = Array.isArray(warehouseRows) ? warehouseRows : warehouseRows?.data || [];
+        setWarehouses(normalizedWarehouses);
+      }
+
+      if (stockRows) {
+        const normalizedStock = Array.isArray(stockRows) ? stockRows : stockRows?.data || [];
+        setStockBalances(
+          normalizedStock.map((row: any) => {
+            const qty = Number(row.quantity_on_hand ?? row.current_stock) || 0;
+            const unitCost = Number(row.weighted_avg_cost) || 0;
+            const value =
+              row.on_hand_value !== undefined && row.on_hand_value !== null
+                ? Number(row.on_hand_value)
+                : qty * unitCost;
+            return {
+              ...row,
+              quantity_on_hand: qty,
+              on_hand_value: Number.isFinite(value) ? value : 0,
+            };
+          })
+        );
+      }
     } catch (error: any) {
       toast.error("Failed to load inventory");
       console.error(error);
@@ -90,12 +171,93 @@ export const useInventory = () => {
     }
   };
 
+  const createItem = async (payload: any) => {
+    try {
+      await inventoryApi.createItem(payload);
+      toast.success("Item created successfully");
+      await fetchInventory();
+      return true;
+    } catch (error: any) {
+      toast.error(error.message || "Failed to create item");
+      return false;
+    }
+  };
+
+  const createWarehouse = async (payload: any) => {
+    try {
+      await inventoryApi.createWarehouse(payload);
+      toast.success("Warehouse created successfully");
+      await fetchInventory();
+      return true;
+    } catch (error: any) {
+      toast.error(error.message || "Failed to create warehouse");
+      return false;
+    }
+  };
+
+  const createStockAdjustment = async (payload: any) => {
+    try {
+      await inventoryApi.createStockAdjustment(payload);
+      toast.success("Stock adjustment recorded");
+      await fetchInventory();
+      return true;
+    } catch (error: any) {
+      toast.error(error.message || "Failed to record stock adjustment");
+      return false;
+    }
+  };
+
+  const createStockTransfer = async (payload: any) => {
+    try {
+      await inventoryApi.createStockTransfer(payload);
+      toast.success("Stock transfer recorded");
+      await fetchInventory();
+      return true;
+    } catch (error: any) {
+      toast.error(error.message || "Failed to record stock transfer");
+      return false;
+    }
+  };
+
+  const addItemVendorLink = async (itemId: string, payload: any) => {
+    try {
+      await inventoryApi.addItemVendorLink(itemId, payload);
+      toast.success("Vendor linked to item");
+      await fetchInventory();
+      return true;
+    } catch (error: any) {
+      toast.error(error.message || "Failed to link vendor");
+      return false;
+    }
+  };
+
+  const markPreferredVendor = async (itemId: string, linkId: string) => {
+    try {
+      await inventoryApi.markPreferredVendor(itemId, linkId);
+      toast.success("Preferred vendor updated");
+      await fetchInventory();
+      return true;
+    } catch (error: any) {
+      toast.error(error.message || "Failed to mark preferred vendor");
+      return false;
+    }
+  };
+
   return {
     inventory,
+    items,
+    warehouses,
+    stockBalances,
     isLoading,
     addItem,
     updateItem,
     deleteItem,
+    createItem,
+    createWarehouse,
+    createStockAdjustment,
+    createStockTransfer,
+    addItemVendorLink,
+    markPreferredVendor,
     refetch: fetchInventory,
   };
 };

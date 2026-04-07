@@ -32,6 +32,13 @@ export interface PurchaseBill {
   due_date: string;
   bill_date: string;
   status: string;
+  base_status?: string;
+  approval?: {
+    status?: string;
+    required?: boolean;
+  };
+  goods_receipt_id?: string | null;
+  purchase_order_id?: string | null;
   lines: PurchaseBillLine[];
   created_at: string;
   updated_at: string;
@@ -127,6 +134,42 @@ export const usePurchaseBills = () => {
     }
   };
 
+  const submitBill = async (id: string, payload?: { comment?: string }) => {
+    try {
+      await purchaseBillApi.submit(id, payload || {});
+      toast.success("Purchase bill submitted for approval");
+      await fetchPurchaseBills();
+      return true;
+    } catch (error: any) {
+      toast.error(error.message || "Failed to submit purchase bill");
+      return false;
+    }
+  };
+
+  const rejectBill = async (id: string, payload: { comment: string }) => {
+    try {
+      await purchaseBillApi.reject(id, payload);
+      toast.success("Purchase bill rejected");
+      await fetchPurchaseBills();
+      return true;
+    } catch (error: any) {
+      toast.error(error.message || "Failed to reject purchase bill");
+      return false;
+    }
+  };
+
+  const resubmitBill = async (id: string, payload?: { comment?: string }) => {
+    try {
+      await purchaseBillApi.resubmit(id, payload || {});
+      toast.success("Purchase bill resubmitted");
+      await fetchPurchaseBills();
+      return true;
+    } catch (error: any) {
+      toast.error(error.message || "Failed to resubmit purchase bill");
+      return false;
+    }
+  };
+
   const postBill = async (id: string) => {
     try {
       await purchaseBillApi.post(id);
@@ -156,7 +199,10 @@ export const usePurchaseBills = () => {
     isLoading,
     createDraft,
     updateDraft,
+    submitBill,
     approveBill,
+    rejectBill,
+    resubmitBill,
     postBill,
     voidBill,
     refetch: fetchPurchaseBills,

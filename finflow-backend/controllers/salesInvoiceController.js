@@ -33,6 +33,21 @@ class SalesInvoiceController {
     return res.json(invoice);
   };
 
+  submitForApproval = async (req, res) => {
+    const invoice = await this.salesInvoiceService.submitForApproval(req.user.id, req.params.id, req.body || {}, req.requestMeta || {});
+    return res.json(invoice);
+  };
+
+  reject = async (req, res) => {
+    const invoice = await this.salesInvoiceService.reject(req.user.id, req.params.id, req.body || {}, req.requestMeta || {});
+    return res.json(invoice);
+  };
+
+  resubmit = async (req, res) => {
+    const invoice = await this.salesInvoiceService.resubmit(req.user.id, req.params.id, req.body || {}, req.requestMeta || {});
+    return res.json(invoice);
+  };
+
   post = async (req, res) => {
     const invoice = await this.salesInvoiceService.post(req.user.id, req.params.id, req.requestMeta || {});
     return res.json(invoice);

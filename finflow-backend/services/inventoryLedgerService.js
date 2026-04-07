@@ -1,5 +1,11 @@
 "use strict";
 
+const { sqlParams } = require("../utils/sqlParams");
+
+// TODO(accounting-refactor): this is the modern inventory authority, but it
+// still anchors `company_id` and `created_by_user_id` to legacy `profiles`.
+// Keep behavior stable for now; later prompts should migrate these FKs once the
+// tenancy model is separated cleanly from profile/auth concerns.
 class InventoryLedgerService {
   constructor(db, options = {}) {
     if (!db) throw new Error("InventoryLedgerService requires a mysql connection");
@@ -7,9 +13,12 @@ class InventoryLedgerService {
     this.accountingEngine = options.accountingEngine || null;
   }
 
-  q(sql, params = []) {
+  q(sql, params = [], conn = null) {
+    if (conn) {
+      return conn.execute(sql, sqlParams(params)).then(([rows]) => rows);
+    }
     return new Promise((resolve, reject) => {
-      this.db.query(sql, params, (err, rows) => {
+      this.db.query(sql, sqlParams(params), (err, rows) => {
         if (err) return reject(err);
         return resolve(rows);
       });
@@ -106,6 +115,7 @@ class InventoryLedgerService {
         reference_type ENUM(
           'opening_balance',
           'purchase_bill',
+          'goods_receipt',
           'sales_invoice',
           'sales_credit_note',
           'purchase_debit_note',
@@ -128,6 +138,7 @@ class InventoryLedgerService {
       )
       `,
       `ALTER TABLE items ADD COLUMN IF NOT EXISTS costing_method_hint ENUM('weighted_average','fifo') NOT NULL DEFAULT 'weighted_average'`,
+      `ALTER TABLE items ADD COLUMN IF NOT EXISTS is_active TINYINT(1) DEFAULT 1`,
       `ALTER TABLE stock_movements ADD COLUMN IF NOT EXISTS cost_layer_ref VARCHAR(36) DEFAULT NULL`,
       `
       ALTER TABLE stock_movements
@@ -148,6 +159,7 @@ class InventoryLedgerService {
       MODIFY COLUMN reference_type ENUM(
         'opening_balance',
         'purchase_bill',
+        'goods_receipt',
         'sales_invoice',
         'sales_credit_note',
         'purchase_debit_note',
@@ -178,10 +190,11 @@ class InventoryLedgerService {
     }
   }
 
-  async ensureDefaultWarehouse(companyId, newId) {
+  async ensureDefaultWarehouse(companyId, newId, conn = null) {
     const existing = await this.q(
       `SELECT id FROM warehouses WHERE company_id=? AND is_default=1 LIMIT 1`,
-      [companyId]
+      [companyId],
+      conn
     );
     if (existing.length) return existing[0].id;
 
@@ -189,20 +202,21 @@ class InventoryLedgerService {
     await this.q(
       `INSERT INTO warehouses (id, company_id, name, code, is_default, is_active)
        VALUES (?, ?, 'Main Warehouse', 'MAIN', 1, 1)`,
-      [warehouseId, companyId]
+      [warehouseId, companyId],
+      conn
     );
     return warehouseId;
   }
 
-  async findOrCreateItem({ companyId, name, sku = null, description = null, defaultPurchasePrice = 0, defaultSellingPrice = 0, newId }) {
+  async findOrCreateItem({ companyId, name, sku = null, description = null, defaultPurchasePrice = 0, defaultSellingPrice = 0, newId, conn = null }) {
     if (!name) throw new Error("Item name is required");
 
     const bySku = sku
-      ? await this.q(`SELECT * FROM items WHERE company_id=? AND sku=? LIMIT 1`, [companyId, sku])
+      ? await this.q(`SELECT * FROM items WHERE company_id=? AND sku=? LIMIT 1`, [companyId, sku], conn)
       : [];
     if (bySku.length) return bySku[0];
 
-    const byName = await this.q(`SELECT * FROM items WHERE company_id=? AND name=? LIMIT 1`, [companyId, name]);
+    const byName = await this.q(`SELECT * FROM items WHERE company_id=? AND name=? LIMIT 1`, [companyId, name], conn);
     if (byName.length) return byName[0];
 
     const itemId = newId();
@@ -210,14 +224,15 @@ class InventoryLedgerService {
       `INSERT INTO items
        (id, company_id, name, sku, description, default_purchase_price, default_selling_price, is_active)
        VALUES (?, ?, ?, ?, ?, ?, ?, 1)`,
-      [itemId, companyId, name, sku, description, Number(defaultPurchasePrice || 0), Number(defaultSellingPrice || 0)]
+      [itemId, companyId, name, sku, description, Number(defaultPurchasePrice || 0), Number(defaultSellingPrice || 0)],
+      conn
     );
 
-    const created = await this.q(`SELECT * FROM items WHERE id=? LIMIT 1`, [itemId]);
+    const created = await this.q(`SELECT * FROM items WHERE id=? LIMIT 1`, [itemId], conn);
     return created[0];
   }
 
-  async getCurrentStock(companyId, itemId, warehouseId = null) {
+  async getCurrentStock(companyId, itemId, warehouseId = null, conn = null) {
     const whereWarehouse = warehouseId ? "AND warehouse_id = ?" : "";
     const params = warehouseId ? [companyId, itemId, warehouseId] : [companyId, itemId];
     const rows = await this.q(
@@ -226,13 +241,14 @@ class InventoryLedgerService {
         WHERE company_id = ?
           AND item_id = ?
           ${whereWarehouse}`,
-      params
+      params,
+      conn
     );
     return this.qty(rows[0]?.qty || 0);
   }
 
-  async getStock(companyId, itemId, warehouseId = null) {
-    return this.getCurrentStock(companyId, itemId, warehouseId);
+  async getStock(companyId, itemId, warehouseId = null, conn = null) {
+    return this.getCurrentStock(companyId, itemId, warehouseId, conn);
   }
 
   async getStockLedger(companyId, itemId, warehouseId = null) {
@@ -265,7 +281,7 @@ class InventoryLedgerService {
     });
   }
 
-  async getWeightedAverageCost(companyId, itemId, warehouseId = null) {
+  async getWeightedAverageCost(companyId, itemId, warehouseId = null, conn = null) {
     const whereWarehouse = warehouseId ? "AND warehouse_id = ?" : "";
     const params = warehouseId ? [companyId, itemId, warehouseId] : [companyId, itemId];
 
@@ -277,7 +293,8 @@ class InventoryLedgerService {
        WHERE company_id = ?
          AND item_id = ?
          ${whereWarehouse}`,
-      params
+      params,
+      conn
     );
 
     const qtyIn = Number(rows[0]?.qty_in || 0);
@@ -286,7 +303,7 @@ class InventoryLedgerService {
     return Number((costIn / qtyIn).toFixed(4));
   }
 
-  async getIssueUnitCost(companyId, itemId, warehouseId = null, costingMethod = "weighted_average") {
+  async getIssueUnitCost(companyId, itemId, warehouseId = null, costingMethod = "weighted_average", conn = null) {
     if (costingMethod === "fifo") {
       const fifoRows = await this.q(
         `SELECT unit_cost
@@ -297,12 +314,13 @@ class InventoryLedgerService {
             AND quantity_delta > 0
           ORDER BY created_at ASC, id ASC
           LIMIT 1`,
-        warehouseId ? [companyId, itemId, warehouseId] : [companyId, itemId]
+        warehouseId ? [companyId, itemId, warehouseId] : [companyId, itemId],
+        conn
       );
       return Number(fifoRows[0]?.unit_cost || 0);
     }
 
-    return this.getWeightedAverageCost(companyId, itemId, warehouseId);
+    return this.getWeightedAverageCost(companyId, itemId, warehouseId, conn);
   }
 
   async createMovement({
@@ -318,6 +336,8 @@ class InventoryLedgerService {
     reason = null,
     costLayerRef = null,
     createdByUserId,
+    postAccounting = true,
+    conn = null,
   }) {
     const qty = Number(quantityDelta);
     if (!Number.isFinite(qty) || qty === 0) throw new Error("quantityDelta must be non-zero");
@@ -344,10 +364,11 @@ class InventoryLedgerService {
         reason,
         costLayerRef,
         createdByUserId,
-      ]
+      ],
+      conn
     );
 
-    if (this.accountingEngine && ["sale_issue", "sales_return", "adjustment_in", "adjustment_out"].includes(movementType)) {
+    if (postAccounting && this.accountingEngine && ["sale_issue", "sales_return", "adjustment_in", "adjustment_out"].includes(movementType)) {
       try {
         await this.accountingEngine.postInventoryMovement({
           companyId,
@@ -363,6 +384,55 @@ class InventoryLedgerService {
 
   async recordMovement(args) {
     return this.createMovement(args);
+  }
+
+  async previewSaleIssue({ companyId, lines, warehouseId = null, newId, costingMethod = "weighted_average", conn = null }) {
+    if (!Array.isArray(lines) || !lines.length) return { applied: false, reason: "no-lines", movements: [], total_cost: 0 };
+
+    const resolvedWarehouseId = warehouseId || await this.ensureDefaultWarehouse(companyId, newId, conn);
+    const results = [];
+    let totalCost = 0;
+
+    for (const line of lines) {
+      const qty = Number(line.quantity || 0);
+      if (qty <= 0 || !line.item_id) continue;
+
+      const lookup = await this.q(`SELECT * FROM items WHERE id=? AND company_id=? LIMIT 1`, [line.item_id, companyId], conn);
+      if (!lookup.length) {
+        throw new Error(`Sale issue item not found for line: ${line.product_name || line.name || line.sku || line.item_id}`);
+      }
+
+      const item = lookup[0];
+      const currentStock = await this.getCurrentStock(companyId, item.id, resolvedWarehouseId, conn);
+      if (currentStock < qty) {
+        throw new Error(`Insufficient stock for item ${item.name}. Available=${currentStock}, requested=${qty}`);
+      }
+
+      const unitCost = await this.getIssueUnitCost(companyId, item.id, resolvedWarehouseId, costingMethod, conn);
+      if (!Number.isFinite(unitCost) || unitCost < 0) {
+        throw new Error(`Unable to resolve issue cost for item ${item.name}`);
+      }
+
+      const lineTotalCost = this.money(qty * unitCost);
+      totalCost = this.money(totalCost + lineTotalCost);
+      results.push({
+        item_id: item.id,
+        item_name: item.name,
+        warehouse_id: resolvedWarehouseId,
+        quantity: this.qty(qty),
+        quantity_delta: this.qty(-qty),
+        unit_cost: this.qty(unitCost),
+        total_cost: lineTotalCost,
+        line_no: line.line_no || null,
+      });
+    }
+
+    return {
+      applied: results.length > 0,
+      warehouse_id: resolvedWarehouseId,
+      movements: results,
+      total_cost: totalCost,
+    };
   }
 
   async createOpeningBalance({ companyId, itemId, quantity, unitCost = 0, warehouseId = null, createdByUserId, newId }) {
@@ -386,19 +456,43 @@ class InventoryLedgerService {
     return { applied: true, warehouse_id: resolvedWarehouseId, quantity_delta: qty, unit_cost: unitCost };
   }
 
-  async applyPurchaseReceipt({ companyId, productName, sku, quantity, totalAmount, purchaseId, warehouseId = null, createdByUserId, newId }) {
+  async applyPurchaseReceipt({
+    companyId,
+    itemId = null,
+    productName,
+    sku,
+    quantity,
+    totalAmount,
+    purchaseId,
+    referenceType = "purchase_bill",
+    referenceId = null,
+    warehouseId = null,
+    createdByUserId,
+    newId,
+    conn = null,
+  }) {
     const qty = Number(quantity || 0);
     if (qty <= 0) return { applied: false, reason: "no-positive-quantity" };
 
-    const item = await this.findOrCreateItem({
-      companyId,
-      name: productName,
-      sku: sku || null,
-      defaultPurchasePrice: qty > 0 ? Number(totalAmount || 0) / qty : 0,
-      newId,
-    });
+    let item = null;
+    if (itemId) {
+      const lookup = await this.q(`SELECT * FROM items WHERE id=? AND company_id=? LIMIT 1`, [itemId, companyId], conn);
+      item = lookup[0] || null;
+      if (!item) {
+        throw new Error("Referenced inventory item was not found for purchase receipt");
+      }
+    } else {
+      item = await this.findOrCreateItem({
+        companyId,
+        name: productName,
+        sku: sku || null,
+        defaultPurchasePrice: qty > 0 ? Number(totalAmount || 0) / qty : 0,
+        newId,
+        conn,
+      });
+    }
 
-    const resolvedWarehouseId = warehouseId || await this.ensureDefaultWarehouse(companyId, newId);
+    const resolvedWarehouseId = warehouseId || await this.ensureDefaultWarehouse(companyId, newId, conn);
     const unitCost = qty > 0 ? Number(Number(totalAmount || 0) / qty) : 0;
 
     await this.createMovement({
@@ -409,22 +503,36 @@ class InventoryLedgerService {
       movementType: "purchase_receipt",
       quantityDelta: qty,
       unitCost,
-      referenceType: "purchase_bill",
-      referenceId: purchaseId,
-      reason: `Purchase receipt ${purchaseId}`,
+      referenceType,
+      referenceId: referenceId || purchaseId,
+      reason: `Purchase receipt ${referenceId || purchaseId}`,
       createdByUserId,
+      conn,
     });
 
     return { applied: true, item_id: item.id, warehouse_id: resolvedWarehouseId, quantity_delta: qty, unit_cost: unitCost };
   }
 
-  async applyPurchaseReturn({ companyId, itemId, quantity, purchaseId, warehouseId = null, createdByUserId, newId, costingMethod = "weighted_average" }) {
+  async applyPurchaseReturn({
+    companyId,
+    itemId,
+    quantity,
+    purchaseId,
+    warehouseId = null,
+    createdByUserId,
+    newId,
+    costingMethod = "weighted_average",
+    unitCost = null,
+    conn = null,
+  }) {
     const qty = Number(quantity || 0);
     if (qty <= 0) throw new Error("Purchase return quantity must be greater than 0");
     const resolvedWarehouseId = warehouseId || await this.ensureDefaultWarehouse(companyId, newId);
-    const available = await this.getCurrentStock(companyId, itemId, resolvedWarehouseId);
+    const available = await this.getCurrentStock(companyId, itemId, resolvedWarehouseId, conn);
     if (available < qty) throw new Error(`Insufficient stock for purchase return. Available=${available}, requested=${qty}`);
-    const unitCost = await this.getIssueUnitCost(companyId, itemId, resolvedWarehouseId, costingMethod);
+    const resolvedUnitCost = unitCost === null || unitCost === undefined
+      ? await this.getIssueUnitCost(companyId, itemId, resolvedWarehouseId, costingMethod, conn)
+      : Number(unitCost);
 
     await this.createMovement({
       id: newId(),
@@ -433,68 +541,55 @@ class InventoryLedgerService {
       warehouseId: resolvedWarehouseId,
       movementType: "purchase_return",
       quantityDelta: -qty,
-      unitCost,
+      unitCost: resolvedUnitCost,
       referenceType: "purchase_debit_note",
       referenceId: purchaseId,
       reason: `Purchase return ${purchaseId}`,
       createdByUserId,
+      conn,
     });
 
-    return { applied: true, warehouse_id: resolvedWarehouseId, quantity_delta: -qty, unit_cost: unitCost };
+    return { applied: true, warehouse_id: resolvedWarehouseId, quantity_delta: -qty, unit_cost: resolvedUnitCost };
   }
 
-  async applySaleIssue({ companyId, invoiceId, lines, warehouseId = null, createdByUserId, newId, costingMethod = "weighted_average" }) {
-    if (!Array.isArray(lines) || !lines.length) return { applied: false, reason: "no-lines" };
+  async applySaleIssue({ companyId, invoiceId, lines, warehouseId = null, createdByUserId, newId, costingMethod = "weighted_average", postAccounting = true, conn = null }) {
+    const plan = await this.previewSaleIssue({ companyId, lines, warehouseId, newId, costingMethod, conn });
+    if (!plan.applied) {
+      return { applied: false, reason: plan.reason || "no-stock-lines", movements: [], total_cost: 0 };
+    }
 
-    const resolvedWarehouseId = warehouseId || await this.ensureDefaultWarehouse(companyId, newId);
-    const results = [];
-
-    for (const line of lines) {
-      const qty = Number(line.quantity || 0);
-      if (qty <= 0) continue;
-
-      const lookup = line.item_id
-        ? await this.q(`SELECT * FROM items WHERE id=? AND company_id=? LIMIT 1`, [line.item_id, companyId])
-        : await this.q(`SELECT * FROM items WHERE company_id=? AND (sku=? OR name=?) LIMIT 1`, [companyId, line.sku || null, line.product_name || line.name || ""]);
-
-      if (!lookup.length) {
-        throw new Error(`Sale issue item not found for line: ${line.product_name || line.name || line.sku || line.item_id}`);
-      }
-
-      const item = lookup[0];
-      const currentStock = await this.getCurrentStock(companyId, item.id, resolvedWarehouseId);
-      if (currentStock < qty) {
-        throw new Error(`Insufficient stock for item ${item.name}. Available=${currentStock}, requested=${qty}`);
-      }
-
-      const unitCost = await this.getIssueUnitCost(companyId, item.id, resolvedWarehouseId, costingMethod);
-
+    for (const movement of plan.movements) {
       await this.createMovement({
         id: newId(),
         companyId,
-        itemId: item.id,
-        warehouseId: resolvedWarehouseId,
+        itemId: movement.item_id,
+        warehouseId: movement.warehouse_id,
         movementType: "sale_issue",
-        quantityDelta: -qty,
-        unitCost,
+        quantityDelta: movement.quantity_delta,
+        unitCost: movement.unit_cost,
         referenceType: "sales_invoice",
         referenceId: invoiceId,
         reason: `Sales issue ${invoiceId}`,
         createdByUserId,
+        postAccounting,
+        conn,
       });
-
-      results.push({ item_id: item.id, quantity_delta: -qty, unit_cost: unitCost });
     }
 
-    return { applied: true, movements: results };
+    return {
+      applied: true,
+      warehouse_id: plan.warehouse_id,
+      movements: plan.movements,
+      total_cost: plan.total_cost,
+    };
   }
 
-  async applySalesReturn({ companyId, itemId, quantity, referenceId, warehouseId = null, createdByUserId, newId, unitCost = null }) {
+  async applySalesReturn({ companyId, itemId, quantity, referenceId, warehouseId = null, createdByUserId, newId, unitCost = null, conn = null }) {
     const qty = Number(quantity || 0);
     if (qty <= 0) throw new Error("Sales return quantity must be greater than 0");
     const resolvedWarehouseId = warehouseId || await this.ensureDefaultWarehouse(companyId, newId);
     const derivedCost = unitCost === null || unitCost === undefined
-      ? await this.getIssueUnitCost(companyId, itemId, resolvedWarehouseId, "weighted_average")
+      ? await this.getIssueUnitCost(companyId, itemId, resolvedWarehouseId, "weighted_average", conn)
       : Number(unitCost);
 
     await this.createMovement({
@@ -509,6 +604,7 @@ class InventoryLedgerService {
       referenceId,
       reason: `Sales return ${referenceId}`,
       createdByUserId,
+      conn,
     });
 
     return { applied: true, quantity_delta: qty, unit_cost: derivedCost };
@@ -600,7 +696,7 @@ class InventoryLedgerService {
   }
 
   async getStockBalances(companyId) {
-    return this.q(
+    const rows = await this.q(
       `SELECT
           i.id AS item_id,
           i.name AS item_name,
@@ -625,6 +721,15 @@ class InventoryLedgerService {
        ORDER BY i.name ASC`,
       [companyId]
     );
+    return rows.map((row) => {
+      const qty = Number(row.current_stock) || 0;
+      const unitCost = Number(row.weighted_avg_cost) || 0;
+      return {
+        ...row,
+        quantity_on_hand: qty,
+        on_hand_value: this.money(qty * unitCost),
+      };
+    });
   }
 }
 

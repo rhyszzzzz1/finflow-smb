@@ -57,15 +57,16 @@ export const useReceivables = () => {
       const rows = Array.isArray(allRows) ? allRows : allRows.data || [];
       const normalizedRows = rows.map(normalizeLine);
       setReceivables(normalizedRows);
+      const agingBuckets = agingRows?.buckets || agingRows?.bucket || {};
       setAging({
         ...agingRows,
         buckets: {
-          current: toNumber(agingRows?.buckets?.current),
-          days_1_30: toNumber(agingRows?.buckets?.days_1_30),
-          days_31_60: toNumber(agingRows?.buckets?.days_31_60),
-          days_61_90: toNumber(agingRows?.buckets?.days_61_90),
-          days_91_plus: toNumber(agingRows?.buckets?.days_91_plus),
-          total: toNumber(agingRows?.buckets?.total),
+          current: toNumber(agingBuckets?.current),
+          days_1_30: toNumber(agingBuckets?.days_1_30),
+          days_31_60: toNumber(agingBuckets?.days_31_60),
+          days_61_90: toNumber(agingBuckets?.days_61_90),
+          days_91_plus: toNumber(agingBuckets?.days_91_plus),
+          total: toNumber(agingBuckets?.total),
         },
         lines: Array.isArray(agingRows?.lines) ? agingRows.lines.map(normalizeLine) : [],
       });
@@ -73,13 +74,22 @@ export const useReceivables = () => {
       const uniqueCustomerIds = Array.from(
         new Set(normalizedRows.map((row) => row.customer_id).filter((value): value is string => Boolean(value)))
       );
-      const balances = await Promise.all(
+      const balanceResults = await Promise.allSettled(
         uniqueCustomerIds.map(async (customerId) => {
           const result = await paymentApi.getCustomerBalance(customerId);
           return [customerId, toNumber(result?.outstanding_balance)] as const;
         })
       );
-      setCustomerBalances(Object.fromEntries(balances));
+      const balances: Record<string, number> = {};
+      balanceResults.forEach((entry, index) => {
+        if (entry.status === "fulfilled") {
+          const [id, amount] = entry.value;
+          balances[id] = amount;
+        } else {
+          console.warn("Customer balance failed:", uniqueCustomerIds[index], entry.reason);
+        }
+      });
+      setCustomerBalances(balances);
     } catch (error: any) {
       toast.error("Failed to load receivables");
       console.error(error);

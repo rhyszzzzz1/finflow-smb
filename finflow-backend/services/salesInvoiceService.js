@@ -1,6 +1,17 @@
 "use strict";
 
 const crypto = require("crypto");
+const { DEFAULT_ACCOUNT_CODES } = require("./chartOfAccountsService");
+
+/** Bumped when draft invoice persistence / FK behavior changes (surfaced on GET /api/health). */
+const SALES_INVOICE_SERVICE_BUILD_ID = "sales-invoice-draft-v4-line-fk-parent-key";
+
+function coerceMysqlRowId(value) {
+  if (value === null || value === undefined) return null;
+  if (Buffer.isBuffer(value)) return value.toString("utf8");
+  if (typeof value === "bigint") return value.toString();
+  return value;
+}
 
 class SalesInvoiceService {
   constructor(pool, options = {}) {
@@ -16,11 +27,17 @@ class SalesInvoiceService {
     if (!options.accountingControlService) {
       throw new Error("SalesInvoiceService requires an accountingControlService");
     }
+    if (!options.counterpartyService) {
+      throw new Error("SalesInvoiceService requires a counterpartyService");
+    }
 
     this.pool = pool;
     this.journalService = options.journalService;
     this.taxService = options.taxService;
     this.accountingControlService = options.accountingControlService;
+    this.counterpartyService = options.counterpartyService;
+    this.businessRelationshipService = options.businessRelationshipService || null;
+    this.approvalWorkflowService = options.approvalWorkflowService || null;
     this.inventoryLedgerService = options.inventoryLedgerService || null;
     this.auditService = options.auditService || null;
     this.idFactory = options.idFactory || (() => crypto.randomUUID());
@@ -63,6 +80,59 @@ class SalesInvoiceService {
     return Number(Number(value || 0).toFixed(4));
   }
 
+  async buildInventoryCogsPosting(conn, actorUserId, companyId, invoiceId, invoiceNo, lines) {
+    if (!this.inventoryLedgerService) {
+      return { journalLines: [], inventoryPlan: null };
+    }
+
+    const stockLines = lines.filter((line) => line.item_id);
+    if (!stockLines.length) {
+      return { journalLines: [], inventoryPlan: null };
+    }
+
+    const inventoryPlan = await this.inventoryLedgerService.previewSaleIssue({
+      companyId,
+      invoiceId,
+      lines: stockLines,
+      createdByUserId: actorUserId,
+      newId: this.idFactory,
+      conn,
+    });
+
+    if (!inventoryPlan.applied || !inventoryPlan.movements.length) {
+      throw new Error("Inventory-tracked invoice lines require resolvable stock issue cost before posting");
+    }
+
+    const totalCost = this.money(inventoryPlan.total_cost);
+    if (totalCost < 0 || !Number.isFinite(totalCost)) {
+      throw new Error(`Unable to resolve inventory cost for invoice ${invoiceNo}`);
+    }
+
+    if (totalCost === 0) {
+      return { journalLines: [], inventoryPlan };
+    }
+
+    return {
+      inventoryPlan,
+      journalLines: [
+        {
+          accountCode: DEFAULT_ACCOUNT_CODES.costOfGoodsSold,
+          debit: totalCost,
+          credit: 0,
+          itemId: inventoryPlan.movements.length === 1 ? inventoryPlan.movements[0].item_id : null,
+          description: `Cost of goods sold for ${invoiceNo}`,
+        },
+        {
+          accountCode: DEFAULT_ACCOUNT_CODES.inventory,
+          debit: 0,
+          credit: totalCost,
+          itemId: inventoryPlan.movements.length === 1 ? inventoryPlan.movements[0].item_id : null,
+          description: `Inventory reduction for ${invoiceNo}`,
+        },
+      ],
+    };
+  }
+
   async writeAudit(conn, payload) {
     if (!this.auditService) return;
     await this.auditService.logAction(payload, conn);
@@ -91,10 +161,17 @@ class SalesInvoiceService {
         company_id VARCHAR(36) NULL,
         user_id VARCHAR(36) NULL,
         invoice_no VARCHAR(50) NOT NULL,
+        sales_quote_id VARCHAR(36) NULL,
+        sales_order_id VARCHAR(36) NULL,
+        business_relationship_id VARCHAR(36) NULL,
+        counterparty_id VARCHAR(36) NULL,
         customer_id VARCHAR(36) NULL,
         customer_name VARCHAR(255) NULL,
+        customer_legal_name VARCHAR(255) NULL,
         customer_pan_vat_number VARCHAR(100) NULL,
         customer_email VARCHAR(255) NULL,
+        customer_phone VARCHAR(50) NULL,
+        customer_address TEXT NULL,
         invoice_date DATE NOT NULL,
         due_date DATE NOT NULL,
         status ENUM('draft','approved','posted','partially_paid','paid','overdue','void') NOT NULL DEFAULT 'draft',
@@ -121,6 +198,8 @@ class SalesInvoiceService {
         id VARCHAR(36) PRIMARY KEY,
         sales_invoice_id VARCHAR(36) NOT NULL,
         line_no INT NOT NULL,
+        sales_quote_line_id VARCHAR(36) NULL,
+        sales_order_line_id VARCHAR(36) NULL,
         item_id VARCHAR(36) NULL,
         description VARCHAR(255) NOT NULL,
         quantity DECIMAL(14,4) NOT NULL DEFAULT 0,
@@ -138,9 +217,16 @@ class SalesInvoiceService {
       )
       `,
       `ALTER TABLE sales_invoice_headers ADD COLUMN IF NOT EXISTS company_id VARCHAR(36) NULL`,
+      `ALTER TABLE sales_invoice_headers ADD COLUMN IF NOT EXISTS sales_quote_id VARCHAR(36) NULL`,
+      `ALTER TABLE sales_invoice_headers ADD COLUMN IF NOT EXISTS sales_order_id VARCHAR(36) NULL`,
+      `ALTER TABLE sales_invoice_headers ADD COLUMN IF NOT EXISTS business_relationship_id VARCHAR(36) NULL`,
+      `ALTER TABLE sales_invoice_headers ADD COLUMN IF NOT EXISTS counterparty_id VARCHAR(36) NULL`,
       `ALTER TABLE sales_invoice_headers ADD COLUMN IF NOT EXISTS customer_id VARCHAR(36) NULL`,
+      `ALTER TABLE sales_invoice_headers ADD COLUMN IF NOT EXISTS customer_legal_name VARCHAR(255) NULL`,
       `ALTER TABLE sales_invoice_headers ADD COLUMN IF NOT EXISTS customer_pan_vat_number VARCHAR(100) NULL`,
       `ALTER TABLE sales_invoice_headers ADD COLUMN IF NOT EXISTS customer_email VARCHAR(255) NULL`,
+      `ALTER TABLE sales_invoice_headers ADD COLUMN IF NOT EXISTS customer_phone VARCHAR(50) NULL`,
+      `ALTER TABLE sales_invoice_headers ADD COLUMN IF NOT EXISTS customer_address TEXT NULL`,
       `ALTER TABLE sales_invoice_headers ADD COLUMN IF NOT EXISTS taxable_amount DECIMAL(14,2) NOT NULL DEFAULT 0`,
       `ALTER TABLE sales_invoice_headers ADD COLUMN IF NOT EXISTS sequence_id VARCHAR(36) NULL`,
       `ALTER TABLE sales_invoice_headers ADD COLUMN IF NOT EXISTS approved_by_user_id VARCHAR(36) NULL`,
@@ -149,6 +235,8 @@ class SalesInvoiceService {
       `ALTER TABLE sales_invoice_headers ADD COLUMN IF NOT EXISTS created_by_user_id VARCHAR(36) NULL`,
       `ALTER TABLE sales_invoice_headers MODIFY COLUMN status ENUM('draft','approved','posted','partially_paid','paid','overdue','void') NOT NULL DEFAULT 'draft'`,
       `ALTER TABLE sales_invoice_lines ADD COLUMN IF NOT EXISTS line_no INT NOT NULL DEFAULT 1`,
+      `ALTER TABLE sales_invoice_lines ADD COLUMN IF NOT EXISTS sales_quote_line_id VARCHAR(36) NULL`,
+      `ALTER TABLE sales_invoice_lines ADD COLUMN IF NOT EXISTS sales_order_line_id VARCHAR(36) NULL`,
       `ALTER TABLE sales_invoice_lines ADD COLUMN IF NOT EXISTS discount_type ENUM('none','percentage','fixed') NOT NULL DEFAULT 'none'`,
       `ALTER TABLE sales_invoice_lines ADD COLUMN IF NOT EXISTS discount_value DECIMAL(14,4) NOT NULL DEFAULT 0`,
       `ALTER TABLE sales_invoice_lines ADD COLUMN IF NOT EXISTS discount_amount DECIMAL(14,2) NOT NULL DEFAULT 0`,
@@ -167,72 +255,61 @@ class SalesInvoiceService {
   }
 
   async resolveCompanyId(conn, actorUserId) {
-    const company = await this.queryOne(
-      conn,
-      `SELECT id
-         FROM companies
-        WHERE legacy_profile_id = ?
-           OR owner_profile_id = ?
-        LIMIT 1`,
-      [actorUserId, actorUserId]
-    ).catch(() => null);
-
-    return company?.id || actorUserId;
+    return this.counterpartyService.resolveCompanyId(conn, actorUserId);
   }
 
-  async getCustomerSnapshot(conn, actorUserId, companyId, customerId) {
-    const customer = await this.queryOne(
+  async getCustomerSnapshot(conn, actorUserId, companyId, customerId, input = {}) {
+    // TODO(accounting-refactor): keep this legacy-compatible entry point until
+    // invoice payloads stop sending `customer_id` values that may still refer
+    // to legacy clients instead of the canonical counterparty master.
+    const snapshot = await this.counterpartyService.resolveCustomerSnapshot(
       conn,
-      `SELECT id,
-              COALESCE(display_name, legal_name) AS customer_name,
-              pan_vat_number,
-              email
-         FROM customers
-        WHERE id = ?
-          AND company_id = ?
-        LIMIT 1`,
-      [customerId, companyId]
-    ).catch(() => null);
-
-    if (customer) {
-      return {
-        id: customer.id,
-        customer_name: customer.customer_name,
-        customer_pan_vat_number: customer.pan_vat_number || null,
-        customer_email: customer.email || null,
-      };
-    }
-
-    const legacy = await this.queryOne(
-      conn,
-      `SELECT c.id,
-              c.client_name AS customer_name,
-              COALESCE(p.gst_number, '') AS pan_vat_number,
-              COALESCE(c.email, p.email, '') AS email
-         FROM clients c
-         LEFT JOIN profiles p ON p.id = c.linked_profile_id
-        WHERE c.id = ?
-          AND c.user_id = ?
-        LIMIT 1`,
-      [customerId, actorUserId]
+      actorUserId,
+      companyId,
+      customerId,
+      {
+        ...input,
+        customer_id: customerId,
+      }
     );
 
-    if (!legacy) {
-      throw new Error("Customer not found");
-    }
-
     return {
-      id: legacy.id,
-      customer_name: legacy.customer_name,
-      customer_pan_vat_number: legacy.pan_vat_number || null,
-      customer_email: legacy.email || null,
+      id: snapshot.id,
+      counterparty_id: snapshot.id,
+      customer_name: snapshot.display_name,
+      customer_legal_name: snapshot.legal_name,
+      customer_pan_vat_number: snapshot.pan_vat_number,
+      customer_email: snapshot.email,
+      customer_phone: snapshot.phone,
+      customer_address: snapshot.address,
+      linked_profile_id: snapshot.linked_profile_id || null,
     };
   }
 
+  async resolveBusinessRelationship(conn, actorUserId, companyId, customer, payload = {}) {
+    if (!this.businessRelationshipService) {
+      return null;
+    }
+    const relationship = await this.businessRelationshipService.resolveActiveRelationship(conn, {
+      actorUserId,
+      companyId,
+      businessRelationshipId: payload.business_relationship_id || null,
+      counterpartyLinkedProfileId: customer.linked_profile_id || null,
+      perspective: "seller",
+    });
+
+    if (payload.business_relationship_id && !relationship) {
+      throw new Error("Business relationship not found or not accepted");
+    }
+
+    return relationship;
+  }
+
   async calculateLine(conn, actorUserId, rawLine) {
+    const commercialRefs = await this.resolveCommercialReferences(conn, actorUserId, rawLine, rawLine.current_invoice_id || null);
     const quantity = this.qty(rawLine.quantity);
     const unitPrice = this.qty(rawLine.unit_price);
-    const description = String(rawLine.description || "").trim();
+    const description = String(rawLine.description || commercialRefs.description || "").trim();
     const discountType = rawLine.discount_type || "none";
     const discountValue = this.qty(rawLine.discount_value);
     if (!description) throw new Error("Each invoice line requires description");
@@ -264,7 +341,9 @@ class SalesInvoiceService {
     const lineTotal = this.money(taxableBase + lineTaxAmount);
 
     return {
-      item_id: rawLine.item_id || null,
+      sales_quote_line_id: commercialRefs.sales_quote_line_id,
+      sales_order_line_id: commercialRefs.sales_order_line_id,
+      item_id: rawLine.item_id || commercialRefs.item_id || null,
       description,
       quantity,
       unit_price: unitPrice,
@@ -278,6 +357,81 @@ class SalesInvoiceService {
       line_tax_amount: lineTaxAmount,
       line_total: lineTotal,
       taxable_amount: taxableBase,
+    };
+  }
+
+  async resolveCommercialReferences(conn, actorUserId, rawLine, currentInvoiceId = null) {
+    let salesQuoteLine = null;
+    let salesOrderLine = null;
+
+    if (rawLine.sales_quote_line_id) {
+      salesQuoteLine = await this.queryOne(
+        conn,
+        `SELECT sqln.*, sqh.user_id
+           FROM sales_quote_lines sqln
+           JOIN sales_quote_headers sqh ON sqh.id = sqln.sales_quote_id
+          WHERE sqln.id = ?
+          LIMIT 1`,
+        [rawLine.sales_quote_line_id]
+      ).catch(() => null);
+      if (!salesQuoteLine || salesQuoteLine.user_id !== actorUserId) {
+        throw new Error("Referenced sales quote line not found");
+      }
+    }
+
+    if (rawLine.sales_order_line_id) {
+      salesOrderLine = await this.queryOne(
+        conn,
+        `SELECT sol.*, soh.user_id, soh.sales_quote_id
+           FROM sales_order_lines sol
+           JOIN sales_order_headers soh ON soh.id = sol.sales_order_id
+          WHERE sol.id = ?
+          LIMIT 1`,
+        [rawLine.sales_order_line_id]
+      ).catch(() => null);
+      if (!salesOrderLine || salesOrderLine.user_id !== actorUserId) {
+        throw new Error("Referenced sales order line not found");
+      }
+    }
+
+    if (salesOrderLine?.sales_quote_line_id) {
+      if (salesQuoteLine && salesQuoteLine.id !== salesOrderLine.sales_quote_line_id) {
+        throw new Error("Sales order line does not match the referenced quote line");
+      }
+      if (!salesQuoteLine) {
+        salesQuoteLine = await this.queryOne(
+          conn,
+          `SELECT sqln.*, sqh.user_id
+             FROM sales_quote_lines sqln
+             JOIN sales_quote_headers sqh ON sqh.id = sqln.sales_quote_id
+            WHERE sqln.id = ?
+            LIMIT 1`,
+          [salesOrderLine.sales_quote_line_id]
+        ).catch(() => null);
+      }
+    }
+
+    if (salesOrderLine) {
+      const invoicedRow = await this.queryOne(
+        conn,
+        `SELECT COALESCE(SUM(sil.quantity), 0) AS invoiced_quantity
+           FROM sales_invoice_lines sil
+           JOIN sales_invoice_headers sih ON sih.id = sil.sales_invoice_id
+          WHERE sil.sales_order_line_id = ?
+            AND sih.id <> ?`,
+        [salesOrderLine.id, currentInvoiceId || ""]
+      ).catch(() => null);
+      const remaining = this.qty(Number(salesOrderLine.ordered_quantity || 0) - Number(invoicedRow?.invoiced_quantity || 0));
+      if (Number(rawLine.quantity || 0) > remaining) {
+        throw new Error("Invoice quantity exceeds remaining uninvoiced quantity on the referenced sales order line");
+      }
+    }
+
+    return {
+      sales_quote_line_id: salesQuoteLine?.id || null,
+      sales_order_line_id: salesOrderLine?.id || null,
+      item_id: rawLine.item_id || salesOrderLine?.item_id || salesQuoteLine?.item_id || null,
+      description: salesOrderLine?.description || salesQuoteLine?.description || null,
     };
   }
 
@@ -301,49 +455,91 @@ class SalesInvoiceService {
     );
   }
 
-  async replaceInvoiceLines(conn, actorUserId, invoiceId, lines) {
+  async normalizeInvoiceLines(conn, actorUserId, invoiceId, lines) {
     const normalizedLines = [];
     for (const line of lines) {
-      normalizedLines.push(await this.calculateLine(conn, actorUserId, line));
+      normalizedLines.push(await this.calculateLine(conn, actorUserId, {
+        ...line,
+        current_invoice_id: invoiceId,
+      }));
     }
 
     if (!normalizedLines.length) {
       throw new Error("At least one invoice line is required");
     }
 
-    await conn.execute(`DELETE FROM sales_invoice_lines WHERE sales_invoice_id = ?`, [invoiceId]);
-
-    for (let i = 0; i < normalizedLines.length; i += 1) {
-      const line = normalizedLines[i];
-      await conn.execute(
-        `INSERT INTO sales_invoice_lines
-          (id, sales_invoice_id, line_no, item_id, description, quantity, unit_price, discount_type,
-           discount_value, discount_amount, tax_code_id, tax_rate, line_subtotal, line_tax_amount, line_total)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [
-          this.idFactory(),
-          invoiceId,
-          i + 1,
-          line.item_id,
-          line.description,
-          line.quantity,
-          line.unit_price,
-          line.discount_type,
-          line.discount_value,
-          line.discount_amount,
-          line.tax_code_id,
-          line.tax_rate,
-          line.line_subtotal,
-          line.line_tax_amount,
-          line.line_total,
-        ]
-      );
-    }
-
     return {
       lines: normalizedLines,
       totals: this.deriveHeaderTotals(normalizedLines),
     };
+  }
+
+  /**
+   * Persists lines using the exact `sales_invoice_headers.id` value returned by MySQL so child FKs
+   * succeed when the column is CHAR/BINARY or collation differs from the JS UUID string we generated.
+   * @returns {string} Canonical header id for follow-up queries in the same request.
+   */
+  async persistInvoiceLines(conn, invoiceId, normalizedLines) {
+    const headerRow = await this.queryOne(conn, `SELECT id FROM sales_invoice_headers WHERE id = ? LIMIT 1`, [invoiceId]);
+    if (!headerRow) {
+      throw new Error(
+        "Cannot save invoice lines: header row is missing. The INSERT into sales_invoice_headers did not leave a row visible in this transaction — check DB schema vs API, or restart the backend so header-before-lines code is loaded."
+      );
+    }
+
+    const parentKey = coerceMysqlRowId(headerRow.id);
+    if (parentKey === null || parentKey === undefined || parentKey === "") {
+      throw new Error("Cannot save invoice lines: header id from database is empty.");
+    }
+
+    await conn.execute(`DELETE FROM sales_invoice_lines WHERE sales_invoice_id = ?`, [parentKey]);
+
+    for (let i = 0; i < normalizedLines.length; i += 1) {
+      const line = normalizedLines[i];
+      try {
+        await conn.execute(
+          `INSERT INTO sales_invoice_lines
+          (id, sales_invoice_id, line_no, sales_quote_line_id, sales_order_line_id, item_id, description, quantity, unit_price, discount_type,
+           discount_value, discount_amount, tax_code_id, tax_rate, line_subtotal, line_tax_amount, line_total)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [
+            this.idFactory(),
+            parentKey,
+            i + 1,
+            line.sales_quote_line_id,
+            line.sales_order_line_id,
+            line.item_id,
+            line.description,
+            line.quantity,
+            line.unit_price,
+            line.discount_type,
+            line.discount_value,
+            line.discount_amount,
+            line.tax_code_id,
+            line.tax_rate,
+            line.line_subtotal,
+            line.line_tax_amount,
+            line.line_total,
+          ]
+        );
+      } catch (err) {
+        if (err && (err.code === "ER_NO_REFERENCED_ROW_2" || String(err.message || "").includes("foreign key"))) {
+          throw new Error(
+            `Could not insert invoice lines: foreign key to sales_invoice_headers failed while using parent id ${JSON.stringify(parentKey)}. ` +
+              "Often this means the header row was not inserted on the same connection/transaction, or id column types (CHAR vs VARCHAR, collation) do not match between header and line tables."
+          );
+        }
+        throw err;
+      }
+    }
+
+    return parentKey;
+  }
+
+  async replaceInvoiceLines(conn, actorUserId, invoiceId, lines) {
+    const { lines: normalizedLines, totals } = await this.normalizeInvoiceLines(conn, actorUserId, invoiceId, lines);
+    await this.persistInvoiceLines(conn, invoiceId, normalizedLines);
+    return { lines: normalizedLines, totals };
   }
 
   async getPaymentSnapshot(conn, actorUserId, invoiceId, totalAmount) {
@@ -353,8 +549,9 @@ class SalesInvoiceService {
           COALESCE(SUM(CASE WHEN p.type='incoming' AND p.status='posted' THEN pa.allocated_amount ELSE 0 END), 0) AS allocated_amount
        FROM payment_allocations pa
        LEFT JOIN payments p ON p.id = pa.payment_id
-       WHERE pa.invoice_id = ?`,
-      [invoiceId]
+       WHERE pa.sales_invoice_id = ?
+          OR pa.invoice_id = ?`,
+      [invoiceId, invoiceId]
     ).catch(() => null);
 
     const allocatedAmount = this.money(row?.allocated_amount || 0);
@@ -388,19 +585,52 @@ class SalesInvoiceService {
     );
 
     const paymentSnapshot = await this.getPaymentSnapshot(conn, actorUserId, header.id, header.total_amount);
+    const approval = this.approvalWorkflowService
+      ? await this.approvalWorkflowService.buildApprovalView(conn, {
+        companyId: header.company_id || await this.resolveCompanyId(conn, actorUserId),
+        documentType: "sales_invoice",
+        entityId: header.id,
+        header,
+      })
+      : {
+        required: false,
+        workflow_id: null,
+        workflow_name: null,
+        status: header.approval_status || "not_required",
+        current_step_no: null,
+        submitted_at: null,
+        submitted_by_user_id: null,
+        approved_at: header.approved_at || null,
+        approved_by_user_id: header.approved_by_user_id || null,
+        rejected_at: null,
+        rejected_by_user_id: null,
+        rejection_comment: null,
+        decisions: [],
+      };
     return {
       ...header,
       status: this.deriveDisplayStatus(header.status, paymentSnapshot, header.due_date),
       base_status: header.status,
       payment: paymentSnapshot,
+      approval,
+      commercial_origin: {
+        sales_quote_id: header.sales_quote_id || null,
+        sales_order_id: header.sales_order_id || null,
+      },
       lines,
     };
   }
 
-  async createDraft(actorUserId, payload, requestMeta = {}) {
-    return this.withTransaction(async (conn) => {
+  async createDraft(actorUserId, payload, requestMeta = {}, externalConn = null) {
+    const runner = externalConn
+      ? (work) => work(externalConn)
+      : (work) => this.withTransaction(work);
+
+    return runner(async (conn) => {
       const companyId = await this.resolveCompanyId(conn, actorUserId);
-      const customer = await this.getCustomerSnapshot(conn, actorUserId, companyId, payload.customer_id);
+      const customerRef = payload.counterparty_id || payload.customer_id || payload.client_id || null;
+      const customer = await this.getCustomerSnapshot(conn, actorUserId, companyId, customerRef, payload);
+      const businessRelationship = await this.resolveBusinessRelationship(conn, actorUserId, companyId, customer, payload);
       const invoiceDate = payload.invoice_date || new Date().toISOString().slice(0, 10);
       const dueDate = payload.due_date || invoiceDate;
       const numberInfo = await this.accountingControlService.nextDocumentNumber(conn, {
@@ -410,23 +640,30 @@ class SalesInvoiceService {
       });
       const invoiceId = this.idFactory();
 
-      const { totals, lines } = await this.replaceInvoiceLines(conn, actorUserId, invoiceId, payload.lines || []);
+      const { totals, lines } = await this.normalizeInvoiceLines(conn, actorUserId, invoiceId, payload.lines || []);
 
-      await conn.execute(
+      const [insertHeaderResult] = await conn.execute(
         `INSERT INTO sales_invoice_headers
-          (id, company_id, user_id, invoice_no, customer_id, customer_name, customer_pan_vat_number, customer_email,
-           invoice_date, due_date, status, subtotal_amount, discount_amount, taxable_amount, tax_amount, total_amount,
+          (id, company_id, user_id, invoice_no, sales_quote_id, sales_order_id, business_relationship_id, counterparty_id, customer_id, customer_name, customer_legal_name, customer_pan_vat_number, customer_email,
+           customer_phone, customer_address, invoice_date, due_date, status, subtotal_amount, discount_amount, taxable_amount, tax_amount, total_amount,
            notes, sequence_id, created_by_user_id)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'draft', ?, ?, ?, ?, ?, ?, ?, ?)`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'draft', ?, ?, ?, ?, ?, ?, ?, ?)` ,
         [
           invoiceId,
           companyId,
           actorUserId,
           numberInfo.documentNumber,
+          payload.sales_quote_id || null,
+          payload.sales_order_id || null,
+          businessRelationship?.id || null,
+          customer.counterparty_id,
           customer.id,
           customer.customer_name,
+          customer.customer_legal_name,
           customer.customer_pan_vat_number,
           customer.customer_email,
+          customer.customer_phone,
+          customer.customer_address,
           invoiceDate,
           dueDate,
           totals.subtotal_amount,
@@ -439,25 +676,43 @@ class SalesInvoiceService {
           actorUserId,
         ]
       );
+      if (!insertHeaderResult || Number(insertHeaderResult.affectedRows || 0) < 1) {
+        throw new Error("Failed to insert sales_invoice_headers row (0 affected rows). Check DB permissions and schema.");
+      }
+
+      const headerRowId = await this.persistInvoiceLines(conn, invoiceId, lines);
 
       const header = await this.queryOne(
         conn,
         `SELECT *
            FROM sales_invoice_headers
           WHERE id = ?`,
-        [invoiceId]
+        [headerRowId]
       );
+      if (this.approvalWorkflowService) {
+        await this.approvalWorkflowService.initializeDocument(conn, {
+          companyId,
+          documentType: "sales_invoice",
+          entityId: headerRowId,
+        });
+      }
 
-      const hydrated = await this.hydrateInvoice(conn, actorUserId, header);
+      const hydrated = await this.hydrateInvoice(
+        conn,
+        actorUserId,
+        await this.queryOne(conn, `SELECT * FROM sales_invoice_headers WHERE id = ?`, [headerRowId])
+      );
       await this.writeAudit(conn, {
         actorUserId,
         companyId,
         entityType: "sales_invoice",
-        entityId: invoiceId,
+        entityId: headerRowId,
         actionType: "create",
         newValues: {
           invoice_no: header.invoice_no,
           status: header.status,
+          business_relationship_id: header.business_relationship_id,
+          counterparty_id: header.counterparty_id,
           customer_id: header.customer_id,
           total_amount: header.total_amount,
           line_count: lines.length,
@@ -491,16 +746,29 @@ class SalesInvoiceService {
       const beforeState = await this.hydrateInvoice(conn, actorUserId, existing);
 
       const companyId = existing.company_id || await this.resolveCompanyId(conn, actorUserId);
-      const customerId = payload.customer_id || existing.customer_id;
-      const customer = await this.getCustomerSnapshot(conn, actorUserId, companyId, customerId);
+      const customerId = payload.counterparty_id || payload.customer_id || payload.client_id || existing.counterparty_id || existing.customer_id;
+      const customer = await this.getCustomerSnapshot(conn, actorUserId, companyId, customerId, payload);
+      const businessRelationship = await this.resolveBusinessRelationship(conn, actorUserId, companyId, customer, {
+        ...payload,
+        business_relationship_id: payload.business_relationship_id !== undefined
+          ? payload.business_relationship_id
+          : existing.business_relationship_id,
+      });
       const { totals, lines } = await this.replaceInvoiceLines(conn, actorUserId, invoiceId, payload.lines || []);
 
       await conn.execute(
         `UPDATE sales_invoice_headers
-            SET customer_id = ?,
+            SET sales_quote_id = ?,
+                sales_order_id = ?,
+                business_relationship_id = ?,
+                counterparty_id = ?,
+                customer_id = ?,
                 customer_name = ?,
+                customer_legal_name = ?,
                 customer_pan_vat_number = ?,
                 customer_email = ?,
+                customer_phone = ?,
+                customer_address = ?,
                 invoice_date = ?,
                 due_date = ?,
                 subtotal_amount = ?,
@@ -512,10 +780,17 @@ class SalesInvoiceService {
                 updated_at = CURRENT_TIMESTAMP
           WHERE id = ?`,
         [
+          payload.sales_quote_id !== undefined ? payload.sales_quote_id : existing.sales_quote_id,
+          payload.sales_order_id !== undefined ? payload.sales_order_id : existing.sales_order_id,
+          businessRelationship?.id || null,
+          customer.counterparty_id,
           customer.id,
           customer.customer_name,
+          customer.customer_legal_name,
           customer.customer_pan_vat_number,
           customer.customer_email,
+          customer.customer_phone,
+          customer.customer_address,
           payload.invoice_date || existing.invoice_date,
           payload.due_date || existing.due_date,
           totals.subtotal_amount,
@@ -559,8 +834,41 @@ class SalesInvoiceService {
         [invoiceId, actorUserId]
       );
       if (!header) throw new Error("Sales invoice not found");
-      if (header.status !== "draft") throw new Error("Only draft invoices can be approved");
       const companyId = header.company_id || await this.resolveCompanyId(conn, actorUserId);
+
+      if (this.approvalWorkflowService) {
+        const approvalResult = await this.approvalWorkflowService.approveDocument(conn, {
+          companyId,
+          documentType: "sales_invoice",
+          entityId: invoiceId,
+          actorUserId,
+          comment: requestMeta.comment || requestMeta.reason || null,
+        });
+        if (approvalResult.workflowRequired) {
+          const updated = approvalResult.header;
+          const hydrated = await this.hydrateInvoice(conn, actorUserId, updated);
+          await this.writeAudit(conn, {
+            actorUserId,
+            companyId,
+            entityType: "sales_invoice",
+            entityId: invoiceId,
+            actionType: "approve",
+            oldValues: { status: header.status, approval_status: header.approval_status || "draft" },
+            newValues: {
+              status: updated.status,
+              approval_status: updated.approval_status,
+              approved_at: updated.approved_at,
+            },
+            ipAddress: requestMeta.ipAddress || null,
+            userAgent: requestMeta.userAgent || null,
+            route: requestMeta.route || null,
+            method: requestMeta.method || null,
+          });
+          return hydrated;
+        }
+      }
+
+      if (header.status !== "draft") throw new Error("Only draft invoices can be approved");
 
       await conn.execute(
         `UPDATE sales_invoice_headers
@@ -591,6 +899,109 @@ class SalesInvoiceService {
     });
   }
 
+  async submitForApproval(actorUserId, invoiceId, payload = {}, requestMeta = {}) {
+    return this.withTransaction(async (conn) => {
+      const header = await this.queryOne(
+        conn,
+        `SELECT *
+           FROM sales_invoice_headers
+          WHERE id = ?
+            AND user_id = ?
+          FOR UPDATE`,
+        [invoiceId, actorUserId]
+      );
+      if (!header) throw new Error("Sales invoice not found");
+      const companyId = header.company_id || await this.resolveCompanyId(conn, actorUserId);
+
+      if (!this.approvalWorkflowService) {
+        return this.approve(actorUserId, invoiceId, {
+          ...requestMeta,
+          comment: payload.comment || payload.reason || null,
+        });
+      }
+
+      const result = await this.approvalWorkflowService.submitDocument(conn, {
+        companyId,
+        documentType: "sales_invoice",
+        entityId: invoiceId,
+        actorUserId,
+        comment: payload.comment || payload.reason || null,
+      });
+      const updated = result.header && result.header.id
+        ? result.header
+        : await this.queryOne(conn, `SELECT * FROM sales_invoice_headers WHERE id = ?`, [invoiceId]);
+      const hydrated = await this.hydrateInvoice(conn, actorUserId, updated);
+      await this.writeAudit(conn, {
+        actorUserId,
+        companyId,
+        entityType: "sales_invoice",
+        entityId: invoiceId,
+        actionType: result.workflowRequired ? result.decisionType : "submit_for_approval",
+        oldValues: { status: header.status, approval_status: header.approval_status || "draft" },
+        newValues: { status: updated.status, approval_status: updated.approval_status || "not_required" },
+        reason: payload.comment || payload.reason || null,
+        ipAddress: requestMeta.ipAddress || null,
+        userAgent: requestMeta.userAgent || null,
+        route: requestMeta.route || null,
+        method: requestMeta.method || null,
+      });
+      return hydrated;
+    });
+  }
+
+  async reject(actorUserId, invoiceId, payload = {}, requestMeta = {}) {
+    return this.withTransaction(async (conn) => {
+      const header = await this.queryOne(
+        conn,
+        `SELECT *
+           FROM sales_invoice_headers
+          WHERE id = ?
+            AND user_id = ?
+          FOR UPDATE`,
+        [invoiceId, actorUserId]
+      );
+      if (!header) throw new Error("Sales invoice not found");
+      const companyId = header.company_id || await this.resolveCompanyId(conn, actorUserId);
+      if (!this.approvalWorkflowService) {
+        throw new Error("No approval workflow is configured for sales invoices");
+      }
+
+      const result = await this.approvalWorkflowService.rejectDocument(conn, {
+        companyId,
+        documentType: "sales_invoice",
+        entityId: invoiceId,
+        actorUserId,
+        comment: payload.comment || payload.reason || null,
+      });
+      const updated = result.header;
+      const hydrated = await this.hydrateInvoice(conn, actorUserId, updated);
+      await this.writeAudit(conn, {
+        actorUserId,
+        companyId,
+        entityType: "sales_invoice",
+        entityId: invoiceId,
+        actionType: "reject",
+        oldValues: { status: header.status, approval_status: header.approval_status || "draft" },
+        newValues: {
+          status: updated.status,
+          approval_status: updated.approval_status,
+          rejected_at: updated.rejected_at,
+          rejection_comment: updated.rejection_comment,
+        },
+        reason: payload.comment || payload.reason || null,
+        ipAddress: requestMeta.ipAddress || null,
+        userAgent: requestMeta.userAgent || null,
+        route: requestMeta.route || null,
+        method: requestMeta.method || null,
+      });
+      return hydrated;
+    });
+  }
+
+  async resubmit(actorUserId, invoiceId, payload = {}, requestMeta = {}) {
+    return this.submitForApproval(actorUserId, invoiceId, payload, requestMeta);
+  }
+
   async post(actorUserId, invoiceId, requestMeta = {}) {
     return this.withTransaction(async (conn) => {
       const header = await this.queryOne(
@@ -603,11 +1014,19 @@ class SalesInvoiceService {
         [invoiceId, actorUserId]
       );
       if (!header) throw new Error("Sales invoice not found");
-      if (!["approved", "draft"].includes(header.status)) {
-        throw new Error("Only draft or approved invoices can be posted");
-      }
       if (header.posted_journal_entry_id) {
         throw new Error("Invoice has already been posted");
+      }
+      const companyId = header.company_id || await this.resolveCompanyId(conn, actorUserId);
+      if (this.approvalWorkflowService) {
+        await this.approvalWorkflowService.assertCanPost(conn, {
+          companyId,
+          documentType: "sales_invoice",
+          header,
+        });
+      }
+      if (!["approved", "draft"].includes(header.status)) {
+        throw new Error("Only draft or approved invoices can be posted");
       }
 
       const lines = await this.queryAll(
@@ -619,12 +1038,19 @@ class SalesInvoiceService {
         [invoiceId]
       );
       if (!lines.length) throw new Error("Invoice requires at least one line before posting");
-      await this.accountingControlService.validatePostingDate(conn, header.company_id || await this.resolveCompanyId(conn, actorUserId), header.invoice_date);
+      await this.accountingControlService.validatePostingDate(conn, companyId, header.invoice_date);
 
       const revenueAmount = this.money(header.taxable_amount);
       const totalAmount = this.money(header.total_amount);
-      const companyId = header.company_id || await this.resolveCompanyId(conn, actorUserId);
       const outputTaxPostings = await this.taxService.buildOutputTaxPostings(conn, actorUserId, lines);
+      const { journalLines: inventoryJournalLines, inventoryPlan } = await this.buildInventoryCogsPosting(
+        conn,
+        actorUserId,
+        companyId,
+        invoiceId,
+        header.invoice_no,
+        lines
+      );
 
       const journalEntry = await this.journalService.createJournalEntry({
         companyId,
@@ -634,19 +1060,20 @@ class SalesInvoiceService {
         memo: `Post sales invoice ${header.invoice_no}`,
         createdByUserId: actorUserId,
         requestMeta,
+        conn,
         lines: [
           {
             accountCode: "1100-AR",
             debit: totalAmount,
             credit: 0,
-            customerId: header.customer_id || null,
+            customerId: header.counterparty_id || header.customer_id || null,
             description: `Accounts receivable for ${header.invoice_no}`,
           },
           {
             accountCode: "4100-SALES",
             debit: 0,
             credit: revenueAmount,
-            customerId: header.customer_id || null,
+            customerId: header.counterparty_id || header.customer_id || null,
             description: `Sales revenue for ${header.invoice_no}`,
           },
           ...outputTaxPostings.map((posting) => ({
@@ -654,9 +1081,10 @@ class SalesInvoiceService {
             accountCode: posting.accountCode,
             debit: 0,
             credit: posting.amount,
-            customerId: header.customer_id || null,
+            customerId: header.counterparty_id || header.customer_id || null,
             description: `VAT payable for ${header.invoice_no}`,
           })),
+          ...inventoryJournalLines,
         ],
       });
 
@@ -665,27 +1093,28 @@ class SalesInvoiceService {
         journalEntryId: journalEntry.id,
         actorUserId,
         requestMeta,
+        conn,
       });
 
       let inventoryHook = null;
       if (this.inventoryLedgerService && lines.some((line) => line.item_id)) {
         try {
           inventoryHook = await this.inventoryLedgerService.applySaleIssue({
-            companyId: actorUserId,
+            companyId,
             invoiceId,
             lines: lines.map((line) => ({
               item_id: line.item_id,
               quantity: line.quantity,
               product_name: line.description,
+              line_no: line.line_no,
             })),
             createdByUserId: actorUserId,
             newId: this.idFactory,
+            postAccounting: false,
+            conn,
           });
         } catch (error) {
-          inventoryHook = {
-            applied: false,
-            message: error.message,
-          };
+          throw new Error(`Sales invoice posted journal could not complete stock issue: ${error.message}`);
         }
       }
 
@@ -723,7 +1152,7 @@ class SalesInvoiceService {
       });
       return {
         ...hydrated,
-        inventory_hook: inventoryHook,
+        inventory_hook: inventoryHook || inventoryPlan,
       };
     });
   }
@@ -819,4 +1248,5 @@ class SalesInvoiceService {
 
 module.exports = {
   SalesInvoiceService,
+  SALES_INVOICE_SERVICE_BUILD_ID,
 };

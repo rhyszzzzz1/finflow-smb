@@ -12,6 +12,16 @@ dist
 dist-ssr
 *.local
 
+# Environment (secrets)
+.env
+.env.*.local
+
+# Local/generated PDFs (sources & exports)
+docs/*source.pdf
+
+# Generated demo credentials (local seed script)
+finflow-backend/scripts/dummy-tenant-credentials.json
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

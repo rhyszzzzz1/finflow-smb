@@ -4,9 +4,13 @@
   "description": "",
   "main": "index.js",
   "scripts": {
+    "ensure-admin": "node scripts/ensureAdmin.js",
+    "repro:sales-quote": "node scripts/reproSalesQuoteCreate.js",
+    "repro:sales-quote:http": "node scripts/httpSalesQuoteCreate.js",
     "start": "node index.js",
     "seed:coa": "node scripts/seedDefaultChartOfAccounts.js",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "seed:dummy-tenants": "node scripts/seedDummyTenants.js",
+    "test": "node --test tests/*.test.js"
   },
   "keywords": [],
   "author": "",

@@ -1,6 +1,7 @@
 "use strict";
 
 const crypto = require("crypto");
+const { DEFAULT_ACCOUNT_CODES } = require("./chartOfAccountsService");
 
 class SettlementService {
   constructor(pool, options = {}) {
@@ -13,10 +14,14 @@ class SettlementService {
     if (!options.accountingControlService) {
       throw new Error("SettlementService requires an accountingControlService");
     }
+    if (!options.counterpartyService) {
+      throw new Error("SettlementService requires a counterpartyService");
+    }
 
     this.pool = pool;
     this.journalService = options.journalService;
     this.accountingControlService = options.accountingControlService;
+    this.counterpartyService = options.counterpartyService;
     this.auditService = options.auditService || null;
     this.idFactory = options.idFactory || (() => crypto.randomUUID());
   }
@@ -54,6 +59,36 @@ class SettlementService {
     return Number(Number(value || 0).toFixed(2));
   }
 
+  buildUnappliedSettlementLine({ type, unappliedAmount, customerId, vendorId, paymentNumber }) {
+    if (unappliedAmount <= 0) {
+      return null;
+    }
+
+    // TODO(accounting-refactor): when advance allocation is introduced, this
+    // line will become the source balance to clear against future invoices or
+    // bills. Until then, unapplied cash must sit in dedicated advance accounts,
+    // not in the normal AR/AP control accounts.
+    if (type === "incoming") {
+      return {
+        accountCode: DEFAULT_ACCOUNT_CODES.customerAdvances,
+        debit: 0,
+        credit: unappliedAmount,
+        customerId,
+        vendorId,
+        description: `Customer advance liability ${paymentNumber}`,
+      };
+    }
+
+    return {
+      accountCode: DEFAULT_ACCOUNT_CODES.vendorAdvances,
+      debit: unappliedAmount,
+      credit: 0,
+      customerId,
+      vendorId,
+      description: `Vendor prepayment asset ${paymentNumber}`,
+    };
+  }
+
   async writeAudit(conn, payload) {
     if (!this.auditService) return;
     await this.auditService.logAction(payload, conn);
@@ -84,6 +119,9 @@ class SettlementService {
         company_id VARCHAR(36) NOT NULL,
         payment_number VARCHAR(50) NULL,
         bank_account_id VARCHAR(36) NULL,
+        counterparty_id VARCHAR(36) NULL,
+        counterparty_role ENUM('customer','vendor') NULL,
+        counterparty_name VARCHAR(255) NULL,
         customer_id VARCHAR(36) NULL,
         vendor_id VARCHAR(36) NULL,
         type ENUM('incoming','outgoing') NOT NULL,
@@ -122,6 +160,9 @@ class SettlementService {
       `,
       `ALTER TABLE payments ADD COLUMN IF NOT EXISTS payment_number VARCHAR(50) NULL`,
       `ALTER TABLE payments ADD COLUMN IF NOT EXISTS bank_account_id VARCHAR(36) NULL`,
+      `ALTER TABLE payments ADD COLUMN IF NOT EXISTS counterparty_id VARCHAR(36) NULL`,
+      `ALTER TABLE payments ADD COLUMN IF NOT EXISTS counterparty_role ENUM('customer','vendor') NULL`,
+      `ALTER TABLE payments ADD COLUMN IF NOT EXISTS counterparty_name VARCHAR(255) NULL`,
       `ALTER TABLE payments ADD COLUMN IF NOT EXISTS customer_id VARCHAR(36) NULL`,
       `ALTER TABLE payments ADD COLUMN IF NOT EXISTS vendor_id VARCHAR(36) NULL`,
       `ALTER TABLE payments ADD COLUMN IF NOT EXISTS allocated_amount DECIMAL(14,2) NOT NULL DEFAULT 0`,
@@ -133,6 +174,11 @@ class SettlementService {
       `ALTER TABLE payment_allocations ADD COLUMN IF NOT EXISTS purchase_bill_id VARCHAR(36) NULL`,
     ];
 
+    // TODO(accounting-refactor): `payments.customer_id` / `payments.vendor_id`
+    // and legacy allocation columns remain for compatibility while the product
+    // finishes migrating to canonical `counterparty_id` plus modern document
+    // ids. New business logic should prefer counterparty_id, sales_invoice_id,
+    // and purchase_bill_id.
     for (const sql of statements) {
       try {
         await this.pool.execute(sql);
@@ -143,16 +189,7 @@ class SettlementService {
   }
 
   async resolveCompanyId(conn, actorUserId) {
-    const company = await this.queryOne(
-      conn,
-      `SELECT id
-         FROM companies
-        WHERE legacy_profile_id = ?
-           OR owner_profile_id = ?
-        LIMIT 1`,
-      [actorUserId, actorUserId]
-    ).catch(() => null);
-    return company?.id || actorUserId;
+    return this.counterpartyService.resolveCompanyId(conn, actorUserId);
   }
 
   async resolveBankAccount(conn, companyId, payload) {
@@ -210,11 +247,15 @@ class SettlementService {
   }
 
   async getSalesInvoiceOutstanding(conn, actorUserId, invoiceId) {
+    // TODO(accounting-refactor): settlement source of truth is
+    // sales invoices + payment allocations. The `invoice_id` fallback keeps
+    // older migrated allocations and legacy invoice reads alive temporarily.
     const modern = await this.queryOne(
       conn,
       `SELECT
           si.id,
           si.invoice_no,
+          si.counterparty_id,
           si.customer_id,
           si.customer_name,
           si.invoice_date,
@@ -227,7 +268,7 @@ class SettlementService {
        WHERE si.user_id = ?
          AND si.id = ?
          AND si.status != 'void'
-       GROUP BY si.id, si.invoice_no, si.customer_id, si.customer_name, si.invoice_date, si.due_date, si.total_amount`,
+       GROUP BY si.id, si.invoice_no, si.counterparty_id, si.customer_id, si.customer_name, si.invoice_date, si.due_date, si.total_amount`,
       [actorUserId, invoiceId]
     ).catch(() => null);
 
@@ -237,7 +278,7 @@ class SettlementService {
         document_type: "sales_invoice",
         id: modern.id,
         document_no: modern.invoice_no,
-        counterparty_id: modern.customer_id || null,
+        counterparty_id: modern.counterparty_id || modern.customer_id || null,
         counterparty_name: modern.customer_name || null,
         document_date: modern.invoice_date,
         due_date: modern.due_date,
@@ -284,11 +325,15 @@ class SettlementService {
   }
 
   async getPurchaseBillOutstanding(conn, actorUserId, billId) {
+    // TODO(accounting-refactor): settlement source of truth is
+    // purchase bills + payment allocations. The `purchase_id` fallback keeps
+    // older migrated allocations and legacy purchase reads alive temporarily.
     const modern = await this.queryOne(
       conn,
       `SELECT
           pb.id,
           pb.bill_no,
+          pb.counterparty_id,
           pb.vendor_id,
           pb.vendor_name,
           pb.bill_date,
@@ -301,7 +346,7 @@ class SettlementService {
        WHERE pb.user_id = ?
          AND pb.id = ?
          AND pb.status != 'void'
-       GROUP BY pb.id, pb.bill_no, pb.vendor_id, pb.vendor_name, pb.bill_date, pb.due_date, pb.total_amount`,
+       GROUP BY pb.id, pb.bill_no, pb.counterparty_id, pb.vendor_id, pb.vendor_name, pb.bill_date, pb.due_date, pb.total_amount`,
       [actorUserId, billId]
     ).catch(() => null);
 
@@ -311,7 +356,7 @@ class SettlementService {
         document_type: "purchase_bill",
         id: modern.id,
         document_no: modern.bill_no,
-        counterparty_id: modern.vendor_id || null,
+        counterparty_id: modern.counterparty_id || modern.vendor_id || null,
         counterparty_name: modern.vendor_name || null,
         document_date: modern.bill_date,
         due_date: modern.due_date,
@@ -472,25 +517,55 @@ class SettlementService {
       const paymentNumber = paymentNumberInfo.documentNumber;
       const bankInfo = await this.resolveBankAccount(conn, companyId, { method, bank_account_id });
 
-      if (type === "incoming" && vendor_id) {
-        throw new Error("Incoming payments cannot target vendors");
-      }
-      if (type === "outgoing" && customer_id) {
-        throw new Error("Outgoing payments cannot target customers");
-      }
+      const counterpartyRole = payload.counterparty_role || (type === "incoming" ? "customer" : "vendor");
+      const counterparty = counterpartyRole === "customer"
+        ? await this.counterpartyService.resolveCustomerSnapshot(
+          conn,
+          actorUserId,
+          companyId,
+          customer_id,
+          {
+            counterparty_id: payload.counterparty_id || null,
+            customer_id,
+            client_id: payload.client_id || null,
+            customer_name: payload.customer_name || payload.client_name || null,
+            email: payload.email || null,
+            phone: payload.phone || null,
+            address: payload.address || null,
+          }
+        )
+        : await this.counterpartyService.resolveVendorSnapshot(
+          conn,
+          actorUserId,
+          companyId,
+          vendor_id,
+          {
+            counterparty_id: payload.counterparty_id || null,
+            vendor_id,
+            vendor_name: payload.vendor_name || null,
+            email: payload.email || null,
+            phone: payload.phone || null,
+            address: payload.address || null,
+          }
+        );
+      const compatibilityCustomerId = counterpartyRole === "customer" ? counterparty.counterparty_id : null;
+      const compatibilityVendorId = counterpartyRole === "vendor" ? counterparty.counterparty_id : null;
 
       await conn.execute(
         `INSERT INTO payments
-          (id, company_id, payment_number, bank_account_id, customer_id, vendor_id, type, amount, allocated_amount, unapplied_amount,
+          (id, company_id, payment_number, bank_account_id, counterparty_id, counterparty_role, counterparty_name, customer_id, vendor_id, type, amount, allocated_amount, unapplied_amount,
            payment_date, method, reference, notes, status, created_by_user_id)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, 'draft', ?)`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, 'draft', ?)`,
         [
           paymentId,
           companyId,
           paymentNumber,
           bankInfo.bankAccountId,
-          customer_id,
-          vendor_id,
+          counterparty.counterparty_id,
+          counterpartyRole,
+          counterparty.display_name,
+          compatibilityCustomerId,
+          compatibilityVendorId,
           type,
           paymentAmount,
           paymentAmount,
@@ -513,8 +588,10 @@ class SettlementService {
           type,
           amount: paymentAmount,
           status: "draft",
-          customer_id,
-          vendor_id,
+          counterparty_id: counterparty.counterparty_id,
+          counterparty_role: counterpartyRole,
+          customer_id: compatibilityCustomerId,
+          vendor_id: compatibilityVendorId,
         },
         ipAddress: requestMeta.ipAddress || null,
         userAgent: requestMeta.userAgent || null,
@@ -531,32 +608,34 @@ class SettlementService {
         accountCode: bankInfo.glAccountId ? undefined : bankInfo.glAccountCode,
         debit: type === "incoming" ? paymentAmount : 0,
         credit: type === "outgoing" ? paymentAmount : 0,
-        customerId: customer_id || null,
-        vendorId: vendor_id || null,
+        customerId: compatibilityCustomerId,
+        vendorId: compatibilityVendorId,
         description: `${type === "incoming" ? "Receipt" : "Payment"} ${paymentNumber}`,
       };
       journalLines.push(cashSide);
 
       if (allocationResult.allocated_total > 0) {
         journalLines.push({
-          accountCode: type === "incoming" ? "1100-AR" : "2100-AP",
+          accountCode: type === "incoming"
+            ? DEFAULT_ACCOUNT_CODES.accountsReceivable
+            : DEFAULT_ACCOUNT_CODES.accountsPayable,
           debit: type === "outgoing" ? allocationResult.allocated_total : 0,
           credit: type === "incoming" ? allocationResult.allocated_total : 0,
-          customerId: customer_id || null,
-          vendorId: vendor_id || null,
+          customerId: compatibilityCustomerId,
+          vendorId: compatibilityVendorId,
           description: `${type === "incoming" ? "Settle receivable" : "Settle payable"} ${paymentNumber}`,
         });
       }
 
-      if (unappliedAmount > 0) {
-        journalLines.push({
-          accountCode: type === "incoming" ? "2100-AP" : "1100-AR",
-          debit: type === "incoming" ? 0 : unappliedAmount,
-          credit: type === "incoming" ? unappliedAmount : 0,
-          customerId: customer_id || null,
-          vendorId: vendor_id || null,
-          description: `${type === "incoming" ? "Customer overpayment liability" : "Vendor advance asset"} ${paymentNumber}`,
-        });
+      const unappliedLine = this.buildUnappliedSettlementLine({
+        type,
+        unappliedAmount,
+        customerId: compatibilityCustomerId,
+        vendorId: compatibilityVendorId,
+        paymentNumber,
+      });
+      if (unappliedLine) {
+        journalLines.push(unappliedLine);
       }
 
       const journalEntry = await this.journalService.createJournalEntry({
@@ -567,6 +646,7 @@ class SettlementService {
         memo: `${type === "incoming" ? "Customer receipt" : "Vendor payment"} ${paymentNumber}`,
         createdByUserId: actorUserId,
         requestMeta,
+        conn,
         lines: journalLines,
       });
 
@@ -575,6 +655,7 @@ class SettlementService {
         journalEntryId: journalEntry.id,
         actorUserId,
         requestMeta,
+        conn,
       });
 
       await conn.execute(
@@ -611,6 +692,9 @@ class SettlementService {
         id: paymentId,
         payment_number: paymentNumber,
         company_id: companyId,
+        counterparty_id: counterparty.counterparty_id,
+        counterparty_role: counterpartyRole,
+        counterparty_name: counterparty.snapshot_name,
         type,
         amount: paymentAmount,
         allocated_amount: allocationResult.allocated_total,
@@ -637,7 +721,7 @@ class SettlementService {
          LEFT JOIN payment_allocations pa ON pa.sales_invoice_id = si.id OR pa.invoice_id = si.id
          LEFT JOIN payments p ON p.id = pa.payment_id
          WHERE si.user_id = ?
-           AND si.customer_id = ?
+           AND COALESCE(si.counterparty_id, si.customer_id) = ?
            AND si.status != 'void'
          GROUP BY si.id, si.invoice_no, si.total_amount`,
         [actorUserId, customerId]
@@ -666,7 +750,7 @@ class SettlementService {
          LEFT JOIN payment_allocations pa ON pa.purchase_bill_id = pb.id OR pa.purchase_id = pb.id
          LEFT JOIN payments p ON p.id = pa.payment_id
          WHERE pb.user_id = ?
-           AND pb.vendor_id = ?
+           AND COALESCE(pb.counterparty_id, pb.vendor_id) = ?
            AND pb.status != 'void'
          GROUP BY pb.id, pb.bill_no, pb.total_amount`,
         [actorUserId, vendorId]
@@ -689,6 +773,7 @@ class SettlementService {
         `SELECT
             si.id AS document_id,
             si.invoice_no AS document_no,
+            COALESCE(si.counterparty_id, si.customer_id) AS counterparty_id,
             si.customer_id,
             si.customer_name,
             si.invoice_date AS document_date,
@@ -700,7 +785,7 @@ class SettlementService {
          LEFT JOIN payments p ON p.id = pa.payment_id
          WHERE si.user_id = ?
            AND si.status != 'void'
-         GROUP BY si.id, si.invoice_no, si.customer_id, si.customer_name, si.invoice_date, si.due_date, si.total_amount
+         GROUP BY si.id, si.invoice_no, COALESCE(si.counterparty_id, si.customer_id), si.customer_id, si.customer_name, si.invoice_date, si.due_date, si.total_amount
          HAVING total_amount - allocated_amount > 0
          ORDER BY si.due_date ASC`
       , [actorUserId]).catch(() => []);
@@ -724,6 +809,7 @@ class SettlementService {
         `SELECT
             pb.id AS document_id,
             pb.bill_no AS document_no,
+            COALESCE(pb.counterparty_id, pb.vendor_id) AS counterparty_id,
             pb.vendor_id,
             pb.vendor_name,
             pb.bill_date AS document_date,
@@ -735,7 +821,7 @@ class SettlementService {
          LEFT JOIN payments p ON p.id = pa.payment_id
          WHERE pb.user_id = ?
            AND pb.status != 'void'
-         GROUP BY pb.id, pb.bill_no, pb.vendor_id, pb.vendor_name, pb.bill_date, pb.due_date, pb.total_amount
+         GROUP BY pb.id, pb.bill_no, COALESCE(pb.counterparty_id, pb.vendor_id), pb.vendor_id, pb.vendor_name, pb.bill_date, pb.due_date, pb.total_amount
          HAVING total_amount - allocated_amount > 0
          ORDER BY pb.due_date ASC`,
         [actorUserId]
@@ -778,18 +864,22 @@ class SettlementService {
 
   async calculateARAging(actorUserId) {
     const lines = await this.getOutstandingReceivables(actorUserId);
+    const buckets = this.bucketAging(lines);
     return {
       type: "receivable",
-      bucket: this.bucketAging(lines),
+      buckets,
+      bucket: buckets,
       lines,
     };
   }
 
   async calculateAPAging(actorUserId) {
     const lines = await this.getOutstandingPayables(actorUserId);
+    const buckets = this.bucketAging(lines);
     return {
       type: "payable",
-      bucket: this.bucketAging(lines),
+      buckets,
+      bucket: buckets,
       lines,
     };
   }

@@ -1,6 +1,7 @@
 "use strict";
 
 const crypto = require("crypto");
+const { sqlParams } = require("../utils/sqlParams");
 
 class AuditService {
   constructor(pool, options = {}) {
@@ -115,7 +116,7 @@ class AuditService {
           (id, user_id, company_id, actor_user_id, entity_type, entity_id, action_type, action, reason,
            before_state, after_state, ip_address, user_agent, http_method, method, endpoint, route, status_code, request_body)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [
+        sqlParams([
           this.idFactory(),
           actorUserId,
           companyId,
@@ -135,7 +136,7 @@ class AuditService {
           route,
           statusCode,
           AuditService.sanitizeJson(requestBody),
-        ]
+        ])
       );
     } catch (_error) {
       // Auditing must never break the primary financial workflow.

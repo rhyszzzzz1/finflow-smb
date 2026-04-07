@@ -48,20 +48,24 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
   const navigate = useNavigate();
 
   useEffect(() => {
-    // Check for existing token on mount
-    const token = localStorage.getItem("auth_token");
-    const storedUser = localStorage.getItem("auth_user");
+    try {
+      const token = localStorage.getItem("auth_token");
+      const storedUser = localStorage.getItem("auth_user");
 
-    if (token && storedUser) {
-      try {
-        setUser(JSON.parse(storedUser));
-        setSession({ token });
-      } catch (e) {
-        localStorage.removeItem("auth_token");
-        localStorage.removeItem("auth_user");
+      if (token && storedUser) {
+        try {
+          setUser(JSON.parse(storedUser));
+          setSession({ token });
+        } catch {
+          localStorage.removeItem("auth_token");
+          localStorage.removeItem("auth_user");
+        }
       }
+    } catch {
+      /* private mode / blocked storage — treat as logged out */
+    } finally {
+      setIsLoading(false);
     }
-    setIsLoading(false);
   }, []);
 
   const signup = async (name: string, email: string, password: string): Promise<boolean> => {
