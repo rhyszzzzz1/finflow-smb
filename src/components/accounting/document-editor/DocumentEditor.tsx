@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { toast } from "sonner";
@@ -25,6 +25,8 @@ type Props = {
   onCancel: () => void;
   onSave: (state: DocumentEditorState) => Promise<any>;
   saveLabel?: string;
+  /** When set (e.g. purchase orders), item dropdown can narrow to Inventory item–vendor links for the selected vendor. */
+  resolveItemOptionsForVendor?: (vendorRef: string) => Promise<{ filterActive: boolean; options: SelectOption[] }>;
 };
 
 function validate(config: DocumentTypeConfig, state: DocumentEditorState): { header: HeaderValidation; lines: LineValidation; ok: boolean } {
@@ -114,6 +116,7 @@ export function DocumentEditor({
   onCancel,
   onSave,
   saveLabel,
+  resolveItemOptionsForVendor,
 }: Props) {
   const [state, setState] = useState<DocumentEditorState>(() => ({
     header: { ...initialState.header },
@@ -122,6 +125,78 @@ export function DocumentEditor({
   const [isSaving, setIsSaving] = useState(false);
   const [headerValidation, setHeaderValidation] = useState<HeaderValidation>({});
   const [lineValidation, setLineValidation] = useState<LineValidation>([]);
+  const [showAllItemOptions, setShowAllItemOptions] = useState(false);
+  const [vendorLinkedOptions, setVendorLinkedOptions] = useState<SelectOption[] | null>(null);
+  const [vendorItemFilterActive, setVendorItemFilterActive] = useState(false);
+
+  const vendorRefForItems = resolveItemOptionsForVendor
+    ? String((state.header as Record<string, unknown>)[config.counterpartyField] || "").trim()
+    : "";
+
+  useEffect(() => {
+    setShowAllItemOptions(false);
+  }, [vendorRefForItems]);
+
+  useEffect(() => {
+    if (!resolveItemOptionsForVendor) {
+      setVendorLinkedOptions(null);
+      setVendorItemFilterActive(false);
+      return;
+    }
+    if (!vendorRefForItems) {
+      setVendorLinkedOptions(null);
+      setVendorItemFilterActive(false);
+      return;
+    }
+    let cancelled = false;
+    resolveItemOptionsForVendor(vendorRefForItems)
+      .then((res) => {
+        if (cancelled) return;
+        if (res.filterActive && res.options.length > 0) {
+          setVendorLinkedOptions(res.options);
+          setVendorItemFilterActive(true);
+        } else {
+          setVendorLinkedOptions(null);
+          setVendorItemFilterActive(false);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setVendorLinkedOptions(null);
+          setVendorItemFilterActive(false);
+          toast.error("Could not load items for this vendor");
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [vendorRefForItems, resolveItemOptionsForVendor]);
+
+  const effectiveItemOptions = useMemo(() => {
+    if (!resolveItemOptionsForVendor) return itemOptions;
+    if (showAllItemOptions || !vendorItemFilterActive || !vendorLinkedOptions?.length) return itemOptions;
+    const byValue = new Map(itemOptions.map((o) => [o.value, o]));
+    const merged: SelectOption[] = [...vendorLinkedOptions];
+    const seen = new Set(merged.map((o) => o.value));
+    for (const line of state.lines) {
+      const id = line.item_id ? String(line.item_id) : "";
+      if (id && !seen.has(id)) {
+        const base = byValue.get(id);
+        if (base) {
+          merged.push(base);
+          seen.add(id);
+        }
+      }
+    }
+    return merged;
+  }, [
+    resolveItemOptionsForVendor,
+    showAllItemOptions,
+    vendorItemFilterActive,
+    vendorLinkedOptions,
+    itemOptions,
+    state.lines,
+  ]);
 
   const canSave = useMemo(() => state.lines.length > 0, [state.lines.length]);
 
@@ -168,9 +243,20 @@ export function DocumentEditor({
             extraFields={extraFields}
             validation={headerValidation}
           />
+          {resolveItemOptionsForVendor && vendorItemFilterActive ? (
+            <label className="flex cursor-pointer items-center gap-2 text-sm text-muted-foreground">
+              <input
+                type="checkbox"
+                className="rounded border-border"
+                checked={showAllItemOptions}
+                onChange={(e) => setShowAllItemOptions(e.target.checked)}
+              />
+              <span>Show all internal items (not only those linked to this vendor in Inventory)</span>
+            </label>
+          ) : null}
           <DocumentLineGrid
             config={config}
-            itemOptions={itemOptions}
+            itemOptions={effectiveItemOptions}
             expenseAccountOptions={expenseAccountOptions}
             lines={state.lines}
             onChangeLines={(lines) => setState((cur) => ({ ...cur, lines }))}

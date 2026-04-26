@@ -19,6 +19,7 @@ function createProcurementPool(initialState = {}) {
     goodsReceiptLines: initialState.goodsReceiptLines || [],
     purchaseBillHeaders: initialState.purchaseBillHeaders || [],
     purchaseBillLines: initialState.purchaseBillLines || [],
+    stockMovements: initialState.stockMovements || [],
   };
 
   const execute = async (sql, params = []) => {
@@ -137,6 +138,11 @@ function createProcurementPool(initialState = {}) {
         line_total: params[9],
       });
       return [{ affectedRows: 1 }];
+    }
+    if (q.startsWith("UPDATE goods_receipt_lines SET item_id = ? WHERE id = ?")) {
+      const line = state.goodsReceiptLines.find((entry) => entry.id === params[1]);
+      if (line) line.item_id = params[0];
+      return [{ affectedRows: line ? 1 : 0 }];
     }
     if (q.startsWith("INSERT INTO goods_receipt_headers")) {
       state.goodsReceiptHeaders.push({
@@ -291,6 +297,31 @@ function createProcurementPool(initialState = {}) {
         row.posted_journal_entry_id = params[0];
       }
       return [{ affectedRows: row ? 1 : 0 }];
+    }
+
+    if (q.startsWith("SELECT COALESCE(SUM(received_quantity), 0) AS expected_qty,")) {
+      const goodsReceiptId = params[0];
+      const itemId = params[1];
+      const relevant = state.goodsReceiptLines.filter(
+        (line) => line.goods_receipt_id === goodsReceiptId && line.item_id === itemId
+      );
+      const expected_qty = relevant.reduce((sum, line) => sum + Number(line.received_quantity || 0), 0);
+      const expected_cost = relevant.reduce((sum, line) => sum + Number(line.line_total || 0), 0);
+      return [[{ expected_qty, expected_cost }]];
+    }
+
+    if (q.startsWith("SELECT COALESCE(SUM(quantity_delta), 0) AS moved_qty")) {
+      const [companyId, itemId, referenceType, referenceId] = params;
+      const moved_qty = state.stockMovements
+        .filter(
+          (m) =>
+            m.company_id === companyId &&
+            m.item_id === itemId &&
+            m.reference_type === referenceType &&
+            m.reference_id === referenceId
+        )
+        .reduce((sum, m) => sum + Number(m.quantity_delta || 0), 0);
+      return [[{ moved_qty }]];
     }
 
     throw new Error(`Unhandled SQL in procurement test fake: ${q}`);
@@ -459,6 +490,82 @@ test("partial goods receipt posts stock and PO quantities stay coherent", async 
   assert.equal(po.status, "partially_received");
 });
 
+test("goods receipt allows PO lines without item_id and persists resolved item on post", async () => {
+  const pool = createProcurementPool({
+    purchaseOrderHeaders: [{
+      id: "po-no-item",
+      company_id: "buyer-1",
+      user_id: "buyer-1",
+      order_no: "PO-NOITEM",
+      counterparty_id: "vendor-1",
+      vendor_id: "vendor-1",
+      vendor_name: "Vendor A",
+      order_date: "2026-04-05",
+      expected_date: "2026-04-10",
+      status: "approved",
+      subtotal_amount: 100,
+      total_amount: 100,
+    }],
+    purchaseOrderLines: [{
+      id: "po-line-no-item",
+      purchase_order_id: "po-no-item",
+      line_no: 1,
+      item_id: null,
+      description: "Description-only line",
+      ordered_quantity: 5,
+      unit_cost: 20,
+      line_total: 100,
+    }],
+  });
+
+  const inventoryCalls = [];
+  const journalCalls = [];
+  const receiptService = new GoodsReceiptService(pool, {
+    counterpartyService: createCounterpartyStub(),
+    accountingControlService: createControlStub("GR"),
+    journalService: {
+      async createJournalEntry(args) {
+        journalCalls.push({ type: "create", args });
+        return { id: "je-gr-no-item" };
+      },
+      async postJournalEntry(args) {
+        journalCalls.push({ type: "post", args });
+        return { id: args.journalEntryId };
+      },
+    },
+    inventoryLedgerService: {
+      async applyPurchaseReceipt(args) {
+        inventoryCalls.push(args);
+        return { applied: true, item_id: args.itemId || "resolved-item-xyz" };
+      },
+    },
+    idFactory: (() => {
+      let i = 300;
+      return () => `gr-no-item-${i++}`;
+    })(),
+  });
+
+  const draft = await receiptService.createDraft("buyer-1", {
+    purchase_order_id: "po-no-item",
+    lines: [
+      { purchase_order_line_id: "po-line-no-item", received_quantity: 2, unit_cost: 20 },
+    ],
+  });
+
+  assert.equal(draft.lines[0].item_id, null);
+  assert.equal(draft.lines[0].description, "Description-only line");
+
+  await receiptService.post("buyer-1", draft.id, {});
+
+  assert.equal(inventoryCalls.length, 1);
+  assert.equal(inventoryCalls[0].itemId, null);
+  assert.equal(inventoryCalls[0].productName, "Description-only line");
+
+  const grLine = pool.state.goodsReceiptLines.find((l) => l.goods_receipt_id === draft.id);
+  assert.ok(grLine);
+  assert.equal(grLine.item_id, "resolved-item-xyz");
+});
+
 test("purchase bill against receipt does not create duplicate stock receipt", async () => {
   const pool = createProcurementPool({
     goodsReceiptHeaders: [{
@@ -503,6 +610,13 @@ test("purchase bill against receipt does not create duplicate stock receipt", as
       description: "Widget",
       ordered_quantity: 10,
       unit_cost: 50,
+    }],
+    stockMovements: [{
+      company_id: "buyer-1",
+      item_id: "item-1",
+      reference_type: "goods_receipt",
+      reference_id: "gr-1",
+      quantity_delta: 4,
     }],
   });
 
@@ -565,6 +679,95 @@ test("purchase bill against receipt does not create duplicate stock receipt", as
   assert.equal(journalCalls[0].args.lines[0].accountCode, "2150-GRNI");
   assert.equal(journalCalls[0].args.lines[0].debit, 200);
   assert.equal(journalCalls[0].args.lines.at(-1).accountCode, "2100-AP");
+});
+
+test("GRN-linked purchase bill backfills stock when posted receipt has no ledger movements", async () => {
+  const pool = createProcurementPool({
+    goodsReceiptHeaders: [{
+      id: "gr-backfill-1",
+      company_id: "buyer-1",
+      user_id: "buyer-1",
+      receipt_no: "GR-BACKFILL-1",
+      purchase_order_id: "po-bf-1",
+      counterparty_id: "vendor-1",
+      vendor_id: "vendor-1",
+      vendor_name: "Vendor A",
+      receipt_date: "2026-04-05",
+      status: "posted",
+    }],
+    goodsReceiptLines: [{
+      id: "gr-backfill-line-1",
+      goods_receipt_id: "gr-backfill-1",
+      line_no: 1,
+      purchase_order_line_id: "po-bf-line-1",
+      item_id: "item-bf-1",
+      description: "Widget",
+      ordered_quantity_snapshot: 5,
+      received_quantity: 5,
+      unit_cost: 40,
+      line_total: 200,
+    }],
+    stockMovements: [],
+  });
+
+  const inventoryCalls = [];
+  const journalCalls = [];
+  const service = new PurchaseBillService(pool, {
+    journalService: {
+      async createJournalEntry(args) {
+        journalCalls.push({ type: "create", args });
+        return { id: "je-bf-1" };
+      },
+      async postJournalEntry(args) {
+        journalCalls.push({ type: "post", args });
+        return { id: args.journalEntryId };
+      },
+    },
+    taxService: {
+      async calculateLineTax() {
+        return {
+          tax_code_id: null,
+          tax_rate: 0,
+          taxable_amount: 200,
+          tax_amount: 0,
+        };
+      },
+      async buildInputTaxPostings() {
+        return [];
+      },
+      async recordTaxTransactionsForPurchaseBill() {},
+    },
+    counterpartyService: createCounterpartyStub(),
+    accountingControlService: createControlStub("PB"),
+    inventoryLedgerService: {
+      async applyPurchaseReceipt(args) {
+        inventoryCalls.push(args);
+        return { applied: true, item_id: args.itemId };
+      },
+    },
+    idFactory: (() => {
+      let i = 200;
+      return () => `pb-id-${i++}`;
+    })(),
+  });
+
+  const draft = await service.createDraft("buyer-1", {
+    vendor_id: "vendor-1",
+    bill_date: "2026-04-05",
+    due_date: "2026-04-10",
+    goods_receipt_id: "gr-backfill-1",
+    lines: [
+      { goods_receipt_line_id: "gr-backfill-line-1", quantity: 5, unit_cost: 40, item_id: "item-bf-1" },
+    ],
+  });
+  const posted = await service.post("buyer-1", draft.id, {});
+
+  assert.equal(posted.base_status, "posted");
+  assert.equal(inventoryCalls.length, 1);
+  assert.equal(inventoryCalls[0].quantity, 5);
+  assert.equal(inventoryCalls[0].referenceType, "goods_receipt");
+  assert.equal(inventoryCalls[0].referenceId, "gr-backfill-1");
+  assert.equal(inventoryCalls[0].itemId, "item-bf-1");
 });
 
 test("direct inventory bill without receipt still debits inventory", async () => {
@@ -647,6 +850,13 @@ test("partial billing against receipt clears only billed portion of GRNI", async
       received_quantity: 4,
       unit_cost: 50,
       line_total: 200,
+    }],
+    stockMovements: [{
+      company_id: "buyer-1",
+      item_id: "item-2",
+      reference_type: "goods_receipt",
+      reference_id: "gr-2",
+      quantity_delta: 4,
     }],
   });
 

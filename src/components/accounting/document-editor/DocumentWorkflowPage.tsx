@@ -8,6 +8,16 @@ import { LoadingState } from "@/components/accounting/LoadingState";
 import { EmptyState } from "@/components/accounting/EmptyState";
 import { DocumentStatusBadge } from "@/components/accounting/DocumentStatusBadge";
 import { formatCurrency, formatDate } from "@/utils/format";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import type { DocumentEditorState, DocumentTypeConfig, EditableLine, SelectOption } from "./documentTypes";
 import { DocumentEditor } from "./DocumentEditor";
 import { DocumentDetailView } from "./DocumentDetailView";
@@ -23,6 +33,12 @@ type Action<T> = {
   onClick: (item: T) => Promise<unknown> | unknown;
   visible?: (item: T) => boolean;
   variant?: "default" | "outline" | "ghost" | "destructive";
+  confirm?: {
+    title: string;
+    confirmLabel: string;
+    description?: string;
+    variant?: "default" | "destructive";
+  };
 };
 
 type Stat = {
@@ -71,6 +87,8 @@ type Props<T> = {
   onCreateDraft: (state: DocumentEditorState) => Promise<unknown>;
   onUpdateDraft?: (id: string, state: DocumentEditorState) => Promise<unknown>;
   createInitialState?: DocumentEditorState;
+  /** Narrow line-item dropdown by vendor (e.g. purchase orders + Inventory links). */
+  resolveItemOptionsForVendor?: (vendorRef: string) => Promise<{ filterActive: boolean; options: SelectOption[] }>;
   renderCreate?: (args: {
     config: DocumentTypeConfig;
     counterpartyOptions: SelectOption[];
@@ -115,12 +133,22 @@ export function DocumentWorkflowPage<T>({
   onCreateDraft,
   onUpdateDraft,
   createInitialState,
+  resolveItemOptionsForVendor,
   renderCreate,
 }: Props<T>) {
   const [tab, setTab] = useState<"list" | "create" | "view" | "edit">("list");
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [detail, setDetail] = useState<DetailPayload | null>(null);
   const [isDetailLoading, setIsDetailLoading] = useState(false);
+  const [confirmOpen, setConfirmOpen] = useState(false);
+  const [confirmCtx, setConfirmCtx] = useState<{
+    id: string;
+    status: string | null;
+    documentNo: string | null;
+    action: Action<T>;
+    item: T;
+  } | null>(null);
+  const [pendingActionKey, setPendingActionKey] = useState<string | null>(null);
 
   const loadDetail = async (id: string) => {
     setIsDetailLoading(true);
@@ -142,6 +170,27 @@ export function DocumentWorkflowPage<T>({
     setSelectedId(id);
     setTab("edit");
     await loadDetail(id);
+  };
+
+  const runAction = async (action: Action<T>, item: T) => {
+    const id = getItemId(item);
+    const status = getStatus ? (getStatus(item) as string | null) : null;
+    const documentNo = getDocumentNo ? getDocumentNo(item) : id;
+    const key = `${id}::${action.label}`;
+    if (pendingActionKey === key) return;
+
+    if (action.confirm) {
+      setConfirmCtx({ id, status, documentNo, action, item });
+      setConfirmOpen(true);
+      return;
+    }
+
+    try {
+      setPendingActionKey(key);
+      await action.onClick(item);
+    } finally {
+      setPendingActionKey(null);
+    }
   };
 
   const editorInitialState = useMemo<DocumentEditorState>(() => {
@@ -266,8 +315,14 @@ export function DocumentWorkflowPage<T>({
                             {actions
                               .filter((action) => (action.visible ? action.visible(item) : true))
                               .map((action) => (
-                                <Button key={`${id}-${action.label}`} variant={action.variant || "outline"} size="sm" onClick={() => action.onClick(item)}>
-                                  {action.label}
+                                <Button
+                                  key={`${id}-${action.label}`}
+                                  variant={action.variant || "outline"}
+                                  size="sm"
+                                  disabled={pendingActionKey === `${id}::${action.label}`}
+                                  onClick={() => runAction(action, item)}
+                                >
+                                  {pendingActionKey === `${id}::${action.label}` ? "Working…" : action.label}
                                 </Button>
                               ))}
                           </div>
@@ -312,6 +367,7 @@ export function DocumentWorkflowPage<T>({
                 setTab("list");
               }}
               saveLabel="Create draft"
+              resolveItemOptionsForVendor={resolveItemOptionsForVendor}
             />
           )}
         </TabsContent>
@@ -362,6 +418,7 @@ export function DocumentWorkflowPage<T>({
                   setTab("list");
                 }}
                 saveLabel="Save draft"
+                resolveItemOptionsForVendor={resolveItemOptionsForVendor}
               />
             ) : (
               <EmptyState title="No draft loaded" description="Select a draft document from the list to edit." />
@@ -371,6 +428,54 @@ export function DocumentWorkflowPage<T>({
           )}
         </TabsContent>
       </Tabs>
+
+      <AlertDialog open={confirmOpen} onOpenChange={setConfirmOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>{confirmCtx?.action.confirm?.title || "Confirm action"}</AlertDialogTitle>
+            <AlertDialogDescription>
+              <div className="space-y-2">
+                {confirmCtx?.action.confirm?.description ? <div>{confirmCtx.action.confirm.description}</div> : null}
+                <div className="text-sm">
+                  <div>
+                    <span className="text-muted-foreground">Document:</span>{" "}
+                    <span className="font-semibold text-foreground">{confirmCtx?.documentNo || confirmCtx?.id}</span>
+                  </div>
+                  <div>
+                    <span className="text-muted-foreground">Status:</span>{" "}
+                    <span className="font-semibold text-foreground">{confirmCtx?.status || "—"}</span>
+                  </div>
+                </div>
+              </div>
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={pendingActionKey === (confirmCtx ? `${confirmCtx.id}::${confirmCtx.action.label}` : null)}>
+              Cancel
+            </AlertDialogCancel>
+            <AlertDialogAction
+              variant={confirmCtx?.action.confirm?.variant || confirmCtx?.action.variant === "destructive" ? "destructive" : "default"}
+              disabled={pendingActionKey === (confirmCtx ? `${confirmCtx.id}::${confirmCtx.action.label}` : null)}
+              onClick={async () => {
+                if (!confirmCtx) return;
+                const key = `${confirmCtx.id}::${confirmCtx.action.label}`;
+                try {
+                  setPendingActionKey(key);
+                  await confirmCtx.action.onClick(confirmCtx.item);
+                  setConfirmOpen(false);
+                  setConfirmCtx(null);
+                } finally {
+                  setPendingActionKey(null);
+                }
+              }}
+            >
+              {pendingActionKey === (confirmCtx ? `${confirmCtx.id}::${confirmCtx.action.label}` : null)
+                ? "Working…"
+                : confirmCtx?.action.confirm?.confirmLabel || "Confirm"}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }

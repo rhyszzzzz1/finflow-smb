@@ -4,6 +4,10 @@ import { Check, ChevronDown, ChevronUp } from "lucide-react"
 
 import { cn } from "@/lib/utils"
 
+/** Radix SelectItem must not use value=""; use these and map to null/"" in onValueChange. */
+export const SELECT_VALUE_NONE = "__finflow_select_none__"
+export const SELECT_VALUE_ALL = "__finflow_select_all__"
+
 const Select = SelectPrimitive.Root
 
 const SelectGroup = SelectPrimitive.Group

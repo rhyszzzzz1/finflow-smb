@@ -72,14 +72,25 @@ function createPool(initialState = {}) {
       return [{ affectedRows: row ? 1 : 0 }];
     }
 
-    if (q.startsWith("SELECT br.* FROM business_relationships br WHERE (br.buyer_company_id = ? OR br.seller_company_id = ?)")) {
+    if (
+      q.includes("FROM business_relationships br")
+      && q.includes("br.buyer_company_id = ?")
+      && q.includes("br.buyer_profile_id = ?")
+      && q.includes("br.seller_profile_id = ?")
+    ) {
+      const company = params[0];
+      const profile = params[2];
       let rows = state.relationships.filter(
-        (relationship) => relationship.buyer_company_id === params[0] || relationship.seller_company_id === params[1]
+        (relationship) =>
+          relationship.buyer_company_id === company ||
+          relationship.seller_company_id === company ||
+          relationship.buyer_profile_id === profile ||
+          relationship.seller_profile_id === profile
       );
       if (q.includes("AND br.relationship_status = 'accepted'")) {
         rows = rows.filter((relationship) => relationship.relationship_status === "accepted");
       } else if (q.includes("AND br.relationship_status = ?")) {
-        rows = rows.filter((relationship) => relationship.relationship_status === params[2]);
+        rows = rows.filter((relationship) => relationship.relationship_status === params[4]);
       }
       rows.sort((a, b) => String(b.updated_at).localeCompare(String(a.updated_at)));
       return [rows];
@@ -126,7 +137,6 @@ function createService(initialState = {}) {
   });
 
   service.resolveCompanyContext = async (_conn, { actorUserId = null, companyId = null, profileId = null } = {}) => {
-    const key = companyId || profileId || actorUserId;
     const contexts = {
       "buyer-profile": { company_id: "buyer-company", profile_id: "buyer-profile", display_name: "Buyer Co" },
       "seller-profile": { company_id: "seller-company", profile_id: "seller-profile", display_name: "Seller Co" },
@@ -134,9 +144,15 @@ function createService(initialState = {}) {
       "buyer-company": { company_id: "buyer-company", profile_id: "buyer-profile", display_name: "Buyer Co" },
       "seller-company": { company_id: "seller-company", profile_id: "seller-profile", display_name: "Seller Co" },
       "viewer-company": { company_id: "viewer-company", profile_id: "viewer-profile", display_name: "Viewer Co" },
+      "legacy-seller-profile-as-company": {
+        company_id: "legacy-seller-profile-as-company",
+        profile_id: "seller-profile",
+        display_name: "Seller Co",
+      },
     };
-    if (!contexts[key]) {
-      throw new Error(`Unknown company context: ${key}`);
+    const key = [companyId, profileId, actorUserId].find((k) => k && contexts[k]);
+    if (!key) {
+      throw new Error(`Unknown company context: ${companyId || profileId || actorUserId}`);
     }
     return contexts[key];
   };
@@ -269,4 +285,36 @@ test("listing active relationships returns only accepted bilateral links", async
   assert.equal(rows[0].id, "rel-1");
   assert.equal(rows[0].viewer_role, "seller");
   assert.equal(rows[0].counterparty_company_id, "buyer-company");
+});
+
+test("listing matches viewer profile when stored seller_company_id differs from resolved company id", async () => {
+  const { service } = createService({
+    relationships: [
+      {
+        id: "rel-profile-scope",
+        company_id: "buyer-company",
+        buyer_company_id: "buyer-company",
+        seller_company_id: "legacy-seller-profile-as-company",
+        buyer_profile_id: "buyer-profile",
+        seller_profile_id: "seller-profile",
+        relationship_status: "accepted",
+        default_payment_terms_days: null,
+        default_currency: "NPR",
+        credit_limit: null,
+        notes: null,
+        created_by_user_id: "buyer-profile",
+        responded_by_user_id: "seller-profile",
+        accepted_at: "2026-04-04 00:00:00",
+        created_at: "2026-04-04 00:00:00",
+        updated_at: "2026-04-04 00:00:00",
+      },
+    ],
+  });
+
+  const rows = await service.listRelationships("seller-profile", { onlyActive: true });
+
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].id, "rel-profile-scope");
+  assert.equal(rows[0].viewer_role, "seller");
+  assert.equal(rows[0].counterparty_name, "Buyer Co");
 });

@@ -42,17 +42,17 @@ export interface StockBalance {
   on_hand_value: number;
 }
 
-export const useInventory = () => {
+export const useInventory = (opts?: { includeLegacy?: boolean }) => {
   const [inventory, setInventory] = useState<InventoryItem[]>([]);
   const [items, setItems] = useState<ItemMaster[]>([]);
   const [warehouses, setWarehouses] = useState<Warehouse[]>([]);
   const [stockBalances, setStockBalances] = useState<StockBalance[]>([]);
   const [isLoading, setIsLoading] = useState(true);
+  const [isLegacyLoading, setIsLegacyLoading] = useState(false);
 
-  const fetchInventory = async () => {
+  const fetchAuthoritative = async () => {
     try {
-      const [invR, itemsR, whR, stockR] = await Promise.allSettled([
-        inventoryApi.getAll(),
+      const [itemsR, whR, stockR] = await Promise.allSettled([
         inventoryApi.getItems(),
         inventoryApi.getWarehouses(),
         inventoryApi.getStockBalances(),
@@ -64,25 +64,13 @@ export const useInventory = () => {
         return null;
       };
 
-      const data = unwrap(invR, "legacy list");
       const itemRows = unwrap(itemsR, "items");
       const warehouseRows = unwrap(whR, "warehouses");
       const stockRows = unwrap(stockR, "stock balances");
 
-      if (!data && !itemRows && !warehouseRows && !stockRows) {
+      if (!itemRows && !warehouseRows && !stockRows) {
         toast.error("Failed to load inventory");
         return;
-      }
-
-      if (data) {
-        const rows = Array.isArray(data) ? data : data.data || [];
-        setInventory(rows.map((item: any) => ({
-          ...item,
-          stock_quantity: Number(item.stock_quantity) || 0,
-          purchase_price: Number(item.purchase_price) || 0,
-          selling_price: Number(item.selling_price) || 0,
-          tax_rate: Number(item.tax_rate) || 0,
-        })));
       }
 
       if (itemRows) {
@@ -125,17 +113,38 @@ export const useInventory = () => {
   };
 
   useEffect(() => {
-    fetchInventory();
-    // Poll for changes every 5 seconds instead of real-time
-    const interval = setInterval(fetchInventory, 5000);
-    return () => clearInterval(interval);
+    fetchAuthoritative();
+    if (opts?.includeLegacy) {
+      fetchLegacyInventory();
+    }
   }, []);
+
+  const fetchLegacyInventory = async () => {
+    setIsLegacyLoading(true);
+    try {
+      const data = await inventoryApi.getAll();
+      const rows = Array.isArray(data) ? data : data?.data || [];
+      setInventory(rows.map((item: any) => ({
+        ...item,
+        stock_quantity: Number(item.stock_quantity) || 0,
+        purchase_price: Number(item.purchase_price) || 0,
+        selling_price: Number(item.selling_price) || 0,
+        tax_rate: Number(item.tax_rate) || 0,
+      })));
+      return true;
+    } catch (error: any) {
+      toast.error(error.message || "Failed to load compatibility inventory");
+      return false;
+    } finally {
+      setIsLegacyLoading(false);
+    }
+  };
 
   const addItem = async (item: Omit<InventoryItem, "id" | "created_at" | "updated_at">) => {
     try {
       await inventoryApi.add(item);
       toast.success("Product added successfully");
-      await fetchInventory();
+      await fetchLegacyInventory();
       return true;
     } catch (error: any) {
       if (error.message.includes("SKU")) {
@@ -151,7 +160,7 @@ export const useInventory = () => {
     try {
       await inventoryApi.update(id, item);
       toast.success("Product updated successfully");
-      await fetchInventory();
+      await fetchLegacyInventory();
       return true;
     } catch (error: any) {
       toast.error(error.message || "Failed to update product");
@@ -163,7 +172,7 @@ export const useInventory = () => {
     try {
       await inventoryApi.delete(id);
       toast.success("Product deleted successfully");
-      await fetchInventory();
+      await fetchLegacyInventory();
       return true;
     } catch (error: any) {
       toast.error(error.message || "Failed to delete product");
@@ -175,7 +184,7 @@ export const useInventory = () => {
     try {
       await inventoryApi.createItem(payload);
       toast.success("Item created successfully");
-      await fetchInventory();
+      await fetchAuthoritative();
       return true;
     } catch (error: any) {
       toast.error(error.message || "Failed to create item");
@@ -187,7 +196,7 @@ export const useInventory = () => {
     try {
       await inventoryApi.createWarehouse(payload);
       toast.success("Warehouse created successfully");
-      await fetchInventory();
+      await fetchAuthoritative();
       return true;
     } catch (error: any) {
       toast.error(error.message || "Failed to create warehouse");
@@ -199,7 +208,7 @@ export const useInventory = () => {
     try {
       await inventoryApi.createStockAdjustment(payload);
       toast.success("Stock adjustment recorded");
-      await fetchInventory();
+      await fetchAuthoritative();
       return true;
     } catch (error: any) {
       toast.error(error.message || "Failed to record stock adjustment");
@@ -211,7 +220,7 @@ export const useInventory = () => {
     try {
       await inventoryApi.createStockTransfer(payload);
       toast.success("Stock transfer recorded");
-      await fetchInventory();
+      await fetchAuthoritative();
       return true;
     } catch (error: any) {
       toast.error(error.message || "Failed to record stock transfer");
@@ -223,7 +232,7 @@ export const useInventory = () => {
     try {
       await inventoryApi.addItemVendorLink(itemId, payload);
       toast.success("Vendor linked to item");
-      await fetchInventory();
+      await fetchAuthoritative();
       return true;
     } catch (error: any) {
       toast.error(error.message || "Failed to link vendor");
@@ -235,7 +244,7 @@ export const useInventory = () => {
     try {
       await inventoryApi.markPreferredVendor(itemId, linkId);
       toast.success("Preferred vendor updated");
-      await fetchInventory();
+      await fetchAuthoritative();
       return true;
     } catch (error: any) {
       toast.error(error.message || "Failed to mark preferred vendor");
@@ -249,6 +258,7 @@ export const useInventory = () => {
     warehouses,
     stockBalances,
     isLoading,
+    isLegacyLoading,
     addItem,
     updateItem,
     deleteItem,
@@ -258,6 +268,7 @@ export const useInventory = () => {
     createStockTransfer,
     addItemVendorLink,
     markPreferredVendor,
-    refetch: fetchInventory,
+    refetch: fetchAuthoritative,
+    fetchLegacyInventory,
   };
 };

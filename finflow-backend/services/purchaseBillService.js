@@ -399,6 +399,83 @@ class PurchaseBillService {
     return !!(line.item_id || line.inventory_account_id);
   }
 
+  /**
+   * GRN-linked bills intentionally skip applyPurchaseReceipt on post because stock should
+   * be recorded when the goods receipt is posted. If that ledger step was missing (legacy data,
+   * failed hook, etc.), backfill the shortfall here so on-hand matches the posted receipt.
+   * Movements use reference_type goods_receipt + receipt id so repeated bills against the same
+   * GR do not double-count.
+   */
+  async backfillMissingGrnInventory(conn, { companyId, billId, lines, actorUserId, inventoryHookResults }) {
+    if (!this.inventoryLedgerService) return;
+
+    const processedGrItem = new Set();
+    for (const line of lines) {
+      if (!line.goods_receipt_line_id || !this.isInventoryLine(line)) continue;
+
+      const grl = await this.getGoodsReceiptLineForPosting(conn, companyId, line.goods_receipt_line_id);
+      if (!grl || grl.goods_receipt_status !== "posted") continue;
+
+      const itemId = line.item_id || grl.item_id;
+      if (!itemId) continue;
+
+      const grKey = `${grl.goods_receipt_id}:${itemId}`;
+      if (processedGrItem.has(grKey)) continue;
+      processedGrItem.add(grKey);
+
+      const agg = await this.queryOne(
+        conn,
+        `SELECT COALESCE(SUM(received_quantity), 0) AS expected_qty,
+                COALESCE(SUM(line_total), 0) AS expected_cost
+           FROM goods_receipt_lines
+          WHERE goods_receipt_id = ?
+            AND item_id = ?`,
+        [grl.goods_receipt_id, itemId]
+      );
+      const expectedQty = Number(agg?.expected_qty || 0);
+      if (expectedQty <= 0) continue;
+
+      const movedRow = await this.queryOne(
+        conn,
+        `SELECT COALESCE(SUM(quantity_delta), 0) AS moved_qty
+           FROM stock_movements
+          WHERE company_id = ?
+            AND item_id = ?
+            AND reference_type = 'goods_receipt'
+            AND reference_id = ?`,
+        [companyId, itemId, "goods_receipt", grl.goods_receipt_id]
+      );
+      const movedQty = Number(movedRow?.moved_qty || 0);
+      const shortage = this.qty(expectedQty - movedQty);
+      if (shortage <= 0) continue;
+
+      const expectedCost = Number(agg?.expected_cost || 0);
+      const totalAmount = expectedQty > 0 ? this.money((expectedCost / expectedQty) * shortage) : 0;
+
+      const result = await this.inventoryLedgerService.applyPurchaseReceipt({
+        companyId,
+        itemId,
+        productName: line.description || grl.description || "Inventory",
+        sku: null,
+        quantity: shortage,
+        totalAmount,
+        purchaseId: billId,
+        referenceType: "goods_receipt",
+        referenceId: grl.goods_receipt_id,
+        createdByUserId: actorUserId,
+        newId: this.idFactory,
+        conn,
+      });
+      inventoryHookResults.push({
+        ...result,
+        line_no: line.line_no,
+        gr_inventory_backfill: true,
+        goods_receipt_id: grl.goods_receipt_id,
+        item_id: itemId,
+      });
+    }
+  }
+
   async getGoodsReceiptLineForPosting(conn, companyId, goodsReceiptLineId) {
     if (!goodsReceiptLineId) return null;
 
@@ -1051,6 +1128,13 @@ class PurchaseBillService {
 
       const inventoryHookResults = [];
       if (this.inventoryLedgerService) {
+        await this.backfillMissingGrnInventory(conn, {
+          companyId,
+          billId,
+          lines,
+          actorUserId,
+          inventoryHookResults,
+        });
         for (const line of lines.filter((line) => (line.item_id || line.inventory_account_id) && !line.goods_receipt_line_id)) {
           const result = await this.inventoryLedgerService.applyPurchaseReceipt({
             companyId,

@@ -21,6 +21,9 @@ function createPaymentRoutes({ authenticate, paymentController }) {
     asyncHandler(paymentController.applyPayment)
   );
 
+  router.post("/payments/khalti/vendor/initiate", authenticate, asyncHandler(paymentController.khaltiInitiateVendor));
+  router.post("/payments/khalti/vendor/verify", authenticate, asyncHandler(paymentController.khaltiVerifyVendor));
+
   router.get("/bank-accounts", authenticate, asyncHandler(paymentController.listBankAccounts));
   router.get("/receivables", authenticate, asyncHandler(paymentController.getReceivables));
   router.get("/payables", authenticate, asyncHandler(paymentController.getPayables));

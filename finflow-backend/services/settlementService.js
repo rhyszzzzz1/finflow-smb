@@ -186,6 +186,34 @@ class SettlementService {
         // mixed environments may already differ
       }
     }
+
+    await this.migratePaymentAllocationsLegacyConstraints();
+  }
+
+  /**
+   * Legacy `payment_allocations.invoice_id` / `purchase_id` FKs point at `invoices` / `purchases`.
+   * Accounting settlements allocate against `sales_invoice_headers` / `purchase_bill_headers` via
+   * `sales_invoice_id` / `purchase_bill_id`. Drop those FKs and the old XOR check so modern rows
+   * can use only the new columns (invoice_id / purchase_id stay NULL).
+   */
+  async migratePaymentAllocationsLegacyConstraints() {
+    const namedFk = ["fk_alloc_invoice", "fk_alloc_purchase"];
+    const ibfk = [2, 3, 4, 5, 6].map((n) => `payment_allocations_ibfk_${n}`);
+    const fkDrops = [
+      ...namedFk.map((name) => `ALTER TABLE payment_allocations DROP FOREIGN KEY ${name}`),
+      ...ibfk.map((name) => `ALTER TABLE payment_allocations DROP FOREIGN KEY ${name}`),
+    ];
+    const checkDrops = [
+      "ALTER TABLE payment_allocations DROP CHECK chk_alloc_target",
+      "ALTER TABLE payment_allocations DROP CONSTRAINT chk_alloc_target",
+    ];
+    for (const sql of [...fkDrops, ...checkDrops]) {
+      try {
+        await this.pool.execute(sql);
+      } catch (_e) {
+        // Constraint name differs by engine/version or already migrated
+      }
+    }
   }
 
   async resolveCompanyId(conn, actorUserId) {
@@ -445,8 +473,8 @@ class SettlementService {
         await conn.execute(
           `INSERT INTO payment_allocations
             (id, payment_id, invoice_id, sales_invoice_id, allocated_amount)
-           VALUES (?, ?, ?, ?, ?)`,
-          [this.idFactory(), paymentId, targetId, targetId, amount]
+           VALUES (?, ?, NULL, ?, ?)`,
+          [this.idFactory(), paymentId, targetId, amount]
         );
         normalized.push({ target_type: "sales_invoice", target_id: targetId, allocated_amount: amount });
       } else if (["purchase", "purchase_bill"].includes(targetType)) {
@@ -461,8 +489,8 @@ class SettlementService {
         await conn.execute(
           `INSERT INTO payment_allocations
             (id, payment_id, purchase_id, purchase_bill_id, allocated_amount)
-           VALUES (?, ?, ?, ?, ?)`,
-          [this.idFactory(), paymentId, targetId, targetId, amount]
+           VALUES (?, ?, NULL, ?, ?)`,
+          [this.idFactory(), paymentId, targetId, amount]
         );
         normalized.push({ target_type: "purchase_bill", target_id: targetId, allocated_amount: amount });
       } else {

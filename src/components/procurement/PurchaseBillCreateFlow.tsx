@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue, SELECT_VALUE_ALL } from "@/components/ui/select";
 import { Input } from "@/components/ui/input";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -108,7 +108,7 @@ export function PurchaseBillCreateFlow({
     const lines = Array.isArray(receipt?.lines) ? receipt.lines : [];
     return lines.map((l: any) => ({
       id: String(l.id),
-      item_id: String(l.item_id),
+      item_id: l.item_id != null && String(l.item_id).trim() !== "" ? String(l.item_id) : "",
       description: String(l.description || ""),
       received_quantity: toNumber(l.received_quantity),
       billed_quantity: toNumber(l.billed_quantity),
@@ -235,9 +235,9 @@ export function PurchaseBillCreateFlow({
             <div className="grid gap-2">
               <div className="text-sm font-medium">Vendor (optional filter)</div>
               <Select
-                value={vendorId}
+                value={vendorId || SELECT_VALUE_ALL}
                 onValueChange={(v) => {
-                  setVendorId(v);
+                  setVendorId(v === SELECT_VALUE_ALL ? "" : v);
                   setReceiptId("");
                 }}
               >
@@ -245,10 +245,12 @@ export function PurchaseBillCreateFlow({
                   <SelectValue placeholder="Filter by vendor" />
                 </SelectTrigger>
                 <SelectContent className="bg-popover border border-border">
-                  <SelectItem value="">All vendors</SelectItem>
-                  {vendorOptions.map((opt) => (
-                    <SelectItem key={opt.value} value={opt.value}>{opt.label}</SelectItem>
-                  ))}
+                  <SelectItem value={SELECT_VALUE_ALL}>All vendors</SelectItem>
+                  {vendorOptions
+                    .filter((opt) => opt.value !== "")
+                    .map((opt) => (
+                      <SelectItem key={opt.value} value={opt.value}>{opt.label}</SelectItem>
+                    ))}
                 </SelectContent>
               </Select>
             </div>

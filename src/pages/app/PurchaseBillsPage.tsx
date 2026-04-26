@@ -56,11 +56,40 @@ export const PurchaseBillsPage = () => {
       ]}
       actions={[
         { label: "Submit", onClick: (item) => submitBill(item.id), visible: (item: any) => statusVisible(item.base_status || item.status, "draft", "rejected") },
-        { label: "Approve", onClick: (item) => approveBill(item.id), visible: (item: any) => statusVisible(item.base_status || item.status, "pending_approval", "draft") },
+        {
+          label: "Approve Bill",
+          onClick: (item) => approveBill(item.id),
+          visible: (item: any) => statusVisible(item.base_status || item.status, "pending_approval", "draft"),
+          confirm: {
+            title: "Approve purchase bill",
+            confirmLabel: "Approve bill",
+            description: "Approving moves the bill to the posting stage. Confirm vendor, totals, and source links (direct vs receipt-based).",
+          },
+        },
         { label: "Reject", onClick: (item) => rejectBill(item.id, "Rejected from workflow page"), visible: (item: any) => statusVisible(item.base_status || item.status, "pending_approval") },
         { label: "Resubmit", onClick: (item) => resubmitBill(item.id), visible: (item: any) => statusVisible(item.base_status || item.status, "rejected") },
-        { label: "Post", onClick: (item) => postBill(item.id), visible: (item: any) => statusVisible(item.base_status || item.status, "approved") },
-        { label: "Void", onClick: (item) => voidBill(item.id), visible: (item: any) => !statusVisible(item.base_status || item.status, "void", "posted"), variant: "destructive" },
+        {
+          label: "Post Bill",
+          onClick: (item) => postBill(item.id),
+          visible: (item: any) => statusVisible(item.base_status || item.status, "approved"),
+          confirm: {
+            title: "Post purchase bill",
+            confirmLabel: "Post bill",
+            description: "Posting creates the AP and expense/inventory accounting impact and makes the bill read-only.",
+          },
+        },
+        {
+          label: "Void Bill",
+          onClick: (item) => voidBill(item.id),
+          visible: (item: any) => !statusVisible(item.base_status || item.status, "void", "posted"),
+          variant: "destructive",
+          confirm: {
+            title: "Void purchase bill",
+            confirmLabel: "Void bill",
+            description: "Use void only when you must cancel this bill. If posted, you may need a debit note instead depending on policy.",
+            variant: "destructive",
+          },
+        },
       ]}
       counterpartyOptions={vendorOptions}
       itemOptions={itemOptions}

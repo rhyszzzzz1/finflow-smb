@@ -1,4 +1,5 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -13,6 +14,7 @@ import { formatCurrency, formatDate } from "@/utils/format";
 import { useReceivables } from "@/hooks/useReceivables";
 import { usePayables } from "@/hooks/usePayables";
 import { usePayments } from "@/hooks/usePayments";
+import { paymentApi } from "@/services/api";
 
 type PaymentTarget = {
   mode: "incoming" | "outgoing";
@@ -24,11 +26,17 @@ type PaymentTarget = {
 };
 
 export const SettlementView = () => {
+  const [searchParams, setSearchParams] = useSearchParams();
+  const khaltiVerifyPidxRef = useRef<string | null>(null);
+
   const { receivables, aging: receivablesAging, customerBalances, isLoading: receivablesLoading, refetch: refetchReceivables } = useReceivables();
   const { payables, aging: payablesAging, vendorBalances, isLoading: payablesLoading, refetch: refetchPayables } = usePayables();
   const { bankAccounts, applyPayment } = usePayments();
   const [paymentTarget, setPaymentTarget] = useState<PaymentTarget | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [activeTab, setActiveTab] = useState<"receivables" | "payables">(() =>
+    searchParams.get("tab") === "payables" ? "payables" : "receivables"
+  );
   const [paymentForm, setPaymentForm] = useState({
     method: "cash",
     bank_account_id: "",
@@ -37,6 +45,58 @@ export const SettlementView = () => {
     reference: "",
     notes: "",
   });
+
+  useEffect(() => {
+    const t = searchParams.get("tab");
+    if (t === "payables" || t === "receivables") setActiveTab(t);
+  }, [searchParams]);
+
+  useEffect(() => {
+    const pidx = searchParams.get("pidx");
+    const status = searchParams.get("status");
+    if (!pidx || !status) return;
+
+    const dedupeKey = `khalti_vendor_verify_${pidx}`;
+    if (typeof sessionStorage !== "undefined" && sessionStorage.getItem(dedupeKey)) return;
+    if (khaltiVerifyPidxRef.current === pidx) return;
+    khaltiVerifyPidxRef.current = pidx;
+    try {
+      sessionStorage.setItem(dedupeKey, "1");
+    } catch {
+      /* private mode */
+    }
+
+    const run = async () => {
+      try {
+        const result = await paymentApi.khaltiVendorVerify({
+          pidx,
+          status,
+          transaction_id: searchParams.get("transaction_id") || undefined,
+        });
+        if (result.verified) {
+          toast.success(
+            result.already_completed
+              ? "Khalti payment was already recorded."
+              : `Vendor payment ${result.payment?.payment_number || ""} posted`.trim()
+          );
+          await Promise.all([refetchReceivables(), refetchPayables()]);
+        } else {
+          toast.error((result as { detail?: string }).detail || "Khalti payment was not completed.");
+        }
+      } catch (err: unknown) {
+        toast.error(err instanceof Error ? err.message : "Khalti verification failed");
+      } finally {
+        const next = new URLSearchParams(searchParams);
+        next.delete("pidx");
+        next.delete("status");
+        next.delete("transaction_id");
+        setSearchParams(next, { replace: true });
+        khaltiVerifyPidxRef.current = null;
+      }
+    };
+
+    void run();
+  }, [searchParams, setSearchParams, refetchReceivables, refetchPayables]);
 
   const totalReceivables = Number(receivablesAging?.buckets?.total || 0);
   const totalPayables = Number(payablesAging?.buckets?.total || 0);
@@ -56,11 +116,58 @@ export const SettlementView = () => {
 
   const closeDialog = () => setPaymentTarget(null);
 
+  const handleKhaltiVendorRedirect = async () => {
+    if (!paymentTarget || paymentTarget.mode !== "outgoing") return;
+    if (!paymentTarget.counterparty_id) {
+      toast.error("This document is not linked to a registered account yet");
+      return;
+    }
+    const amount = Number(paymentForm.amount || 0);
+    if (amount <= 0) {
+      toast.error("Payment amount must be greater than zero");
+      return;
+    }
+
+    setIsSubmitting(true);
+    try {
+      const session = await paymentApi.khaltiVendorInitiate({
+        amount,
+        date: paymentForm.date,
+        vendor_id: paymentTarget.counterparty_id,
+        document_no: paymentTarget.document_no,
+        reference: paymentForm.reference || null,
+        notes: paymentForm.notes || null,
+        allocations: [
+          {
+            target_type: "purchase_bill",
+            target_id: paymentTarget.document_id,
+            allocated_amount: amount,
+          },
+        ],
+      });
+      const url = (session as { payment_url?: string }).payment_url;
+      if (!url) {
+        toast.error("Server did not return a Khalti payment URL");
+        return;
+      }
+      window.location.assign(url);
+    } catch (err: unknown) {
+      toast.error(err instanceof Error ? err.message : "Could not start Khalti payment");
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!paymentTarget) return;
     if (!paymentTarget.counterparty_id) {
       toast.error("This document is not linked to a registered account yet");
+      return;
+    }
+
+    if (paymentTarget.mode === "outgoing" && paymentForm.method === "khalti_wallet") {
+      await handleKhaltiVendorRedirect();
       return;
     }
 
@@ -121,7 +228,17 @@ export const SettlementView = () => {
         <p className="text-muted-foreground mt-1">Review aging and settle outstanding documents through payment allocations.</p>
       </div>
 
-      <Tabs defaultValue="receivables" className="w-full">
+      <Tabs
+        value={activeTab}
+        onValueChange={(v) => {
+          const next = v as "receivables" | "payables";
+          setActiveTab(next);
+          const params = new URLSearchParams(searchParams);
+          params.set("tab", next);
+          setSearchParams(params, { replace: true });
+        }}
+        className="w-full"
+      >
         <TabsList className="grid w-full max-w-md grid-cols-2">
           <TabsTrigger value="receivables">Receivables</TabsTrigger>
           <TabsTrigger value="payables">Payables</TabsTrigger>
@@ -309,21 +426,47 @@ export const SettlementView = () => {
                 <div className="grid grid-cols-2 gap-4">
                   <div className="grid gap-2">
                     <Label>Method</Label>
-                    <Select value={paymentForm.method} onValueChange={(value) => setPaymentForm({ ...paymentForm, method: value, bank_account_id: value === "cash" ? "" : paymentForm.bank_account_id })}>
-                      <SelectTrigger>
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent className="bg-popover border border-border">
-                        <SelectItem value="cash">Cash</SelectItem>
-                        <SelectItem value="bank_transfer">Bank Transfer</SelectItem>
-                        <SelectItem value="cheque">Cheque</SelectItem>
-                        <SelectItem value="card">Card</SelectItem>
-                        <SelectItem value="wallet">Wallet</SelectItem>
-                        <SelectItem value="other">Other</SelectItem>
-                      </SelectContent>
-                    </Select>
+                    {paymentTarget.mode === "outgoing" ? (
+                      <Select
+                        value={paymentForm.method}
+                        onValueChange={(value) =>
+                          setPaymentForm({ ...paymentForm, method: value, bank_account_id: "" })
+                        }
+                      >
+                        <SelectTrigger>
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent className="bg-popover border border-border">
+                          <SelectItem value="cash">Cash</SelectItem>
+                          <SelectItem value="khalti_wallet">Khalti wallet</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    ) : (
+                      <Select
+                        value={paymentForm.method}
+                        onValueChange={(value) =>
+                          setPaymentForm({
+                            ...paymentForm,
+                            method: value,
+                            bank_account_id: value === "cash" ? "" : paymentForm.bank_account_id,
+                          })
+                        }
+                      >
+                        <SelectTrigger>
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent className="bg-popover border border-border">
+                          <SelectItem value="cash">Cash</SelectItem>
+                          <SelectItem value="bank_transfer">Bank Transfer</SelectItem>
+                          <SelectItem value="cheque">Cheque</SelectItem>
+                          <SelectItem value="card">Card</SelectItem>
+                          <SelectItem value="wallet">Wallet</SelectItem>
+                          <SelectItem value="other">Other</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    )}
                   </div>
-                  {paymentForm.method !== "cash" && (
+                  {paymentTarget.mode === "incoming" && paymentForm.method !== "cash" && (
                     <div className="grid gap-2">
                       <Label>Bank Account</Label>
                       <Select value={paymentForm.bank_account_id} onValueChange={(value) => setPaymentForm({ ...paymentForm, bank_account_id: value })}>
@@ -341,6 +484,12 @@ export const SettlementView = () => {
                     </div>
                   )}
                 </div>
+                {paymentTarget.mode === "outgoing" && paymentForm.method === "khalti_wallet" && (
+                  <p className="text-sm text-muted-foreground rounded-md border border-border bg-muted/40 px-3 py-2">
+                    You will leave FinFlow to pay on Khalti&apos;s secure page. After payment, you will return here and the
+                    vendor payment will be posted automatically if Khalti confirms success.
+                  </p>
+                )}
                 <div className="grid gap-2">
                   <Label>Reference</Label>
                   <Input value={paymentForm.reference} onChange={(e) => setPaymentForm({ ...paymentForm, reference: e.target.value })} />
@@ -352,7 +501,15 @@ export const SettlementView = () => {
               </div>
               <div className="flex justify-end gap-3">
                 <Button type="button" variant="outline" onClick={closeDialog}>Cancel</Button>
-                <Button type="submit" disabled={isSubmitting}>{isSubmitting ? "Posting..." : "Post Payment"}</Button>
+                <Button type="submit" disabled={isSubmitting}>
+                  {isSubmitting
+                    ? paymentTarget.mode === "outgoing" && paymentForm.method === "khalti_wallet"
+                      ? "Redirecting..."
+                      : "Posting..."
+                    : paymentTarget.mode === "outgoing" && paymentForm.method === "khalti_wallet"
+                      ? "Pay with Khalti"
+                      : "Post Payment"}
+                </Button>
               </div>
             </form>
           )}

@@ -37,6 +37,7 @@ const { ChartOfAccountsService } = require("./services/chartOfAccountsService");
 const { AuditService } = require("./services/auditService");
 const { PaymentModel } = require("./models/paymentModel");
 const { PaymentService } = require("./services/paymentService");
+const { KhaltiVendorPaymentService } = require("./services/khaltiVendorPaymentService");
 const { PaymentController } = require("./controllers/paymentController");
 const { SalesInvoiceController } = require("./controllers/salesInvoiceController");
 const { SalesQuoteController } = require("./controllers/salesQuoteController");
@@ -316,7 +317,10 @@ const journalService = new JournalService(accountingPool, {
     auditService,
 });
 const taxService = new TaxService(accountingPool, { counterpartyService });
-const businessRelationshipService = new BusinessRelationshipService(accountingPool, { idFactory: newId });
+const businessRelationshipService = new BusinessRelationshipService(accountingPool, {
+    idFactory: newId,
+    counterpartyService,
+});
 const inventoryLedgerService = new InventoryLedgerService(db, { accountingEngine });
 const invoicePurchaseService = new InvoicePurchaseService(db);
 const salesInvoiceService = new SalesInvoiceService(accountingPool, {
@@ -404,7 +408,11 @@ const accountingReportsService = new AccountingReportsService(db, {
 });
 const paymentModel = new PaymentModel(settlementService);
 const paymentService = new PaymentService(paymentModel, newId);
-const paymentController = new PaymentController(paymentService);
+const khaltiVendorPaymentService = new KhaltiVendorPaymentService(accountingPool, {
+    settlementService,
+    idFactory: newId,
+});
+const paymentController = new PaymentController(paymentService, khaltiVendorPaymentService);
 const salesInvoiceController = new SalesInvoiceController(salesInvoiceService);
 const salesQuoteController = new SalesQuoteController(salesQuoteService);
 const salesOrderController = new SalesOrderController(salesOrderService);
@@ -714,6 +722,7 @@ function initDB() {
             db.query("ALTER TABLE profiles ADD COLUMN IF NOT EXISTS is_admin TINYINT(1) DEFAULT 0", () => { });
             const schemaInitializers = [
                 ["SETTLEMENT", () => settlementService.ensureSchema()],
+                ["KHALTI_VENDOR", () => khaltiVendorPaymentService.ensureSchema()],
                 ["INVENTORY_LEDGER", () => inventoryLedgerService.ensureSchema()],
                 ["INVENTORY_REPOSITORY", () => inventoryRepository.ensureSchema()],
                 ["INVOICE_PURCHASE", () => invoicePurchaseService.ensureSchema()],
@@ -2028,13 +2037,28 @@ app.post("/api/settings", authenticate, (req, res) => {
 // CLIENTS
 // ===========================================================
 
-// Plain list for dropdowns
+// Plain list for dropdowns (join counterparties so linked buyers always have a visible label)
 app.get("/api/clients/list", authenticate, (req, res) => {
-    db.query("SELECT id, linked_profile_id, client_name FROM clients WHERE user_id=? ORDER BY client_name ASC",
-        [req.user.id], (err, rows) => {
+    db.query(
+        `SELECT c.id, c.counterparty_id, c.linked_profile_id,
+                COALESCE(
+                  NULLIF(TRIM(c.client_name), ''),
+                  NULLIF(TRIM(cp.display_name), ''),
+                  NULLIF(TRIM(cp.legal_name), ''),
+                  NULLIF(TRIM(c.email), ''),
+                  NULLIF(TRIM(cp.email), ''),
+                  CONCAT('Customer ', SUBSTRING(COALESCE(c.counterparty_id, c.id), 1, 8))
+                ) AS client_name
+           FROM clients c
+           LEFT JOIN counterparties cp ON cp.id = c.counterparty_id AND COALESCE(cp.is_active, 1) = 1
+          WHERE c.user_id = ?
+       ORDER BY client_name ASC`,
+        [req.user.id],
+        (err, rows) => {
             if (err) return res.status(500).json({ message: err.message });
             res.json(rows);
-        });
+        }
+    );
 });
 
 // Aggregated sales clients for the Clients & Vendors page
@@ -2068,8 +2092,59 @@ app.get("/api/clients/sales", authenticate, (req, res) => {
 });
 
 app.post("/api/clients", authenticate, async (req, res) => {
-    const { linked_profile_id } = req.body;
-    if (!linked_profile_id) return res.status(400).json({ message: "linked_profile_id is required" });
+    const linked_profile_id = req.body?.linked_profile_id && String(req.body.linked_profile_id).trim()
+        ? String(req.body.linked_profile_id).trim()
+        : null;
+    const manualName = req.body?.client_name != null ? String(req.body.client_name).trim() : "";
+    const emailOpt = req.body?.email != null ? String(req.body.email).trim() : "";
+    const phoneOpt = req.body?.phone != null ? String(req.body.phone).trim() : "";
+    const addressOpt = req.body?.address != null ? String(req.body.address).trim() : "";
+
+    // Manual legacy client (no registered profile link)
+    if (manualName && !linked_profile_id) {
+        try {
+            const [dupRows] = await dbPromise.execute(
+                "SELECT id FROM clients WHERE user_id = ? AND LOWER(TRIM(client_name)) = LOWER(?)",
+                [req.user.id, manualName]
+            );
+            if (dupRows.length) return res.status(400).json({ message: "A client with this name already exists" });
+
+            const legacyId = newId();
+            const conn = await accountingPool.getConnection();
+            try {
+                await conn.beginTransaction();
+                const counterparty = await counterpartyService.createOrUpdateCounterparty(conn, req.user.id, {
+                    role_type: "customer",
+                    display_name: manualName,
+                    legal_name: manualName,
+                    email: emailOpt || null,
+                    phone: phoneOpt || null,
+                    address: addressOpt || null,
+                });
+                await conn.execute(
+                    `INSERT INTO clients (id, user_id, linked_profile_id, counterparty_id, client_name, email, phone, address)
+                     VALUES (?, ?, NULL, ?, ?, ?, ?, ?)`,
+                    [legacyId, req.user.id, counterparty.id, manualName, emailOpt || null, phoneOpt || null, addressOpt || null]
+                );
+                await conn.commit();
+            } catch (err) {
+                try { await conn.rollback(); } catch (_rollbackErr) { }
+                conn.release();
+                return res.status(500).json({ message: err.message });
+            }
+            conn.release();
+            const [rows] = await dbPromise.execute("SELECT * FROM clients WHERE id = ?", [legacyId]);
+            return res.status(201).json(rows[0]);
+        } catch (err) {
+            return res.status(500).json({ message: err.message });
+        }
+    }
+
+    if (!linked_profile_id) {
+        return res.status(400).json({
+            message: "Provide client_name to add a manual legacy client, or linked_profile_id to link a registered account.",
+        });
+    }
     if (linked_profile_id === req.user.id) return res.status(400).json({ message: "You cannot add your own account as a client" });
 
     try {
@@ -2138,11 +2213,26 @@ app.delete("/api/clients/:id", authenticate, (req, res) => {
 
 // Plain list for dropdowns
 app.get("/api/vendors/list", authenticate, (req, res) => {
-    db.query("SELECT id, linked_profile_id, vendor_name FROM vendors WHERE user_id=? ORDER BY vendor_name ASC",
-        [req.user.id], (err, rows) => {
+    db.query(
+        `SELECT v.id, v.counterparty_id, v.linked_profile_id,
+                COALESCE(
+                  NULLIF(TRIM(v.vendor_name), ''),
+                  NULLIF(TRIM(cp.display_name), ''),
+                  NULLIF(TRIM(cp.legal_name), ''),
+                  NULLIF(TRIM(v.email), ''),
+                  NULLIF(TRIM(cp.email), ''),
+                  CONCAT('Vendor ', SUBSTRING(COALESCE(v.counterparty_id, v.id), 1, 8))
+                ) AS vendor_name
+           FROM vendors v
+           LEFT JOIN counterparties cp ON cp.id = v.counterparty_id AND COALESCE(cp.is_active, 1) = 1
+          WHERE v.user_id = ?
+       ORDER BY vendor_name ASC`,
+        [req.user.id],
+        (err, rows) => {
             if (err) return res.status(500).json({ message: err.message });
             res.json(rows);
-        });
+        }
+    );
 });
 
 // Aggregated vendors for the Clients & Vendors page
@@ -2176,8 +2266,58 @@ app.get("/api/clients/vendors", authenticate, (req, res) => {
 });
 
 app.post("/api/vendors", authenticate, async (req, res) => {
-    const { linked_profile_id } = req.body;
-    if (!linked_profile_id) return res.status(400).json({ message: "linked_profile_id is required" });
+    const linked_profile_id = req.body?.linked_profile_id && String(req.body.linked_profile_id).trim()
+        ? String(req.body.linked_profile_id).trim()
+        : null;
+    const manualName = req.body?.vendor_name != null ? String(req.body.vendor_name).trim() : "";
+    const emailOpt = req.body?.email != null ? String(req.body.email).trim() : "";
+    const phoneOpt = req.body?.phone != null ? String(req.body.phone).trim() : "";
+    const addressOpt = req.body?.address != null ? String(req.body.address).trim() : "";
+
+    if (manualName && !linked_profile_id) {
+        try {
+            const [dupRows] = await dbPromise.execute(
+                "SELECT id FROM vendors WHERE user_id = ? AND LOWER(TRIM(vendor_name)) = LOWER(?)",
+                [req.user.id, manualName]
+            );
+            if (dupRows.length) return res.status(400).json({ message: "A vendor with this name already exists" });
+
+            const legacyId = newId();
+            const conn = await accountingPool.getConnection();
+            try {
+                await conn.beginTransaction();
+                const counterparty = await counterpartyService.createOrUpdateCounterparty(conn, req.user.id, {
+                    role_type: "vendor",
+                    display_name: manualName,
+                    legal_name: manualName,
+                    email: emailOpt || null,
+                    phone: phoneOpt || null,
+                    address: addressOpt || null,
+                });
+                await conn.execute(
+                    `INSERT INTO vendors (id, user_id, linked_profile_id, counterparty_id, vendor_name, email, phone, address)
+                     VALUES (?, ?, NULL, ?, ?, ?, ?, ?)`,
+                    [legacyId, req.user.id, counterparty.id, manualName, emailOpt || null, phoneOpt || null, addressOpt || null]
+                );
+                await conn.commit();
+            } catch (err) {
+                try { await conn.rollback(); } catch (_rollbackErr) { }
+                conn.release();
+                return res.status(500).json({ message: err.message });
+            }
+            conn.release();
+            const [rows] = await dbPromise.execute("SELECT * FROM vendors WHERE id = ?", [legacyId]);
+            return res.status(201).json(rows[0]);
+        } catch (err) {
+            return res.status(500).json({ message: err.message });
+        }
+    }
+
+    if (!linked_profile_id) {
+        return res.status(400).json({
+            message: "Provide vendor_name to add a manual legacy vendor, or linked_profile_id to link a registered account.",
+        });
+    }
     if (linked_profile_id === req.user.id) return res.status(400).json({ message: "You cannot add your own account as a vendor" });
 
     try {

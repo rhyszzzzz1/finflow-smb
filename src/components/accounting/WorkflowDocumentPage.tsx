@@ -181,11 +181,13 @@ export function WorkflowDocumentPage<T>({
                           <SelectValue placeholder={field.placeholder || `Select ${field.label.toLowerCase()}`} />
                         </SelectTrigger>
                         <SelectContent className="bg-popover border border-border">
-                          {(field.options || []).map((option) => (
-                            <SelectItem key={option.value} value={option.value}>
-                              {option.label}
-                            </SelectItem>
-                          ))}
+                          {(field.options || [])
+                            .filter((option) => option.value !== "")
+                            .map((option) => (
+                              <SelectItem key={option.value} value={option.value}>
+                                {option.label}
+                              </SelectItem>
+                            ))}
                         </SelectContent>
                       </Select>
                     ) : field.type === "textarea" ? (

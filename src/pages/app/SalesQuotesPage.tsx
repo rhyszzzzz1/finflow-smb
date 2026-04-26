@@ -49,7 +49,18 @@ export const SalesQuotesPage = () => {
           visible: (item: any) => statusVisible(item.status, "draft", "sent"),
         },
         { label: "Convert to Order", onClick: (item: any) => convertToOrder(item.id), visible: (item: any) => statusVisible(item.status, "accepted") },
-        { label: "Void", onClick: (item: any) => voidQuote(item.id), visible: (item: any) => !statusVisible(item.status, "void", "converted"), variant: "destructive" },
+        {
+          label: "Void Sales Quote",
+          onClick: (item: any) => voidQuote(item.id),
+          visible: (item: any) => !statusVisible(item.status, "void", "converted"),
+          variant: "destructive",
+          confirm: {
+            title: "Void sales quote",
+            confirmLabel: "Void quote",
+            description: "Void only when you must cancel the quote. If already converted, void the resulting sales order instead.",
+            variant: "destructive",
+          },
+        },
       ]}
       stats={[
         { label: "Draft Quotes", value: String(salesQuotes.filter((quote: any) => statusVisible(quote.status, "draft")).length) },
@@ -73,6 +84,7 @@ export const SalesQuotesPage = () => {
         documentNo: full.quote_number || full.quote_no || full.id,
         header: {
           customer_id: full.customer_id,
+          customer_name: full.customer_name || "",
           quote_date: full.quote_date,
           valid_until: full.valid_until,
           notes: full.notes || "",
@@ -83,6 +95,7 @@ export const SalesQuotesPage = () => {
       toEditorState={(full: any) => ({
         header: {
           customer_id: full.customer_id || "",
+          customer_name: full.customer_name || "",
           quote_date: full.quote_date || today(),
           valid_until: full.valid_until || "",
           notes: full.notes || "",

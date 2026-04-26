@@ -17,7 +17,7 @@ const COLORS = ["#0d9488", "#06b6d4", "#3b82f6", "#8b5cf6"];
 
 const Dashboard = () => {
   const { stats, isLoading } = useDashboardStats();
-  const { inventory } = useInventory();
+  const { inventory } = useInventory({ includeLegacy: true });
 
   // Calculate category data from inventory
   const categoryMap: { [key: string]: number } = {};

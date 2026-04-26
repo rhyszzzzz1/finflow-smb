@@ -239,7 +239,14 @@ class SalesOrderService {
         outstanding_invoice_quantity: this.qty(Number(line.ordered_quantity || 0) - invoicedQuantity),
       });
     }
-    return { ...header, base_status: header.status, status: this.deriveDisplayStatus(header.status, lines), lines };
+    const customerKey = header.counterparty_id || header.customer_id || null;
+    return {
+      ...header,
+      customer_id: customerKey != null ? String(customerKey) : header.customer_id,
+      base_status: header.status,
+      status: this.deriveDisplayStatus(header.status, lines),
+      lines,
+    };
   }
 
   async createDraft(actorUserId, payload, requestMeta = {}) {

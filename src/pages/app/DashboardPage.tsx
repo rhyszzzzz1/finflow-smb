@@ -1,31 +1,68 @@
-import { AlertTriangle, Boxes, ClipboardCheck, FileClock, FileText, Receipt, ShoppingCart, Wallet } from "lucide-react";
+import { AlertTriangle, Boxes, ClipboardCheck, FileClock, FileText, Receipt, RefreshCw, ShoppingCart, Wallet } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { StatCard } from "@/components/Dashboard/StatCard";
 import { useDashboardStats } from "@/hooks/useDashboardStats";
-import { useReconciliations } from "@/hooks/useReconciliations";
 import { formatCurrency } from "@/utils/format";
 import { normalizeReconciliationSummaryReports } from "@/utils/reconciliationSummary";
 import { LoadingState } from "@/components/accounting/LoadingState";
+import { Button } from "@/components/ui/button";
+import { useQuery } from "@tanstack/react-query";
+import { accountingReportsApi } from "@/services/api";
 
 export const DashboardPage = () => {
-  const { stats, isLoading } = useDashboardStats();
-  const { reconciliations } = useReconciliations();
+  const { stats, isLoading, isRefreshing, lastUpdatedAt, refetch, errors } = useDashboardStats();
+  const asOfDate = new Date().toISOString().slice(0, 10);
+  const reconciliationSummaryQuery = useQuery({
+    queryKey: ["dashboard", "reconciliationSummary", asOfDate],
+    queryFn: () => accountingReportsApi.getReconciliationSummary({ asOfDate }),
+    staleTime: 10 * 60 * 1000,
+    gcTime: 60 * 60 * 1000,
+    refetchInterval: 10 * 60 * 1000,
+    refetchOnWindowFocus: false,
+    retry: 1,
+  });
 
   if (isLoading) {
     return <LoadingState title="Dashboard" message="Loading workflow overview..." />;
   }
 
-  const summaryLines = normalizeReconciliationSummaryReports(reconciliations?.summary?.reports);
+  const summaryLines = normalizeReconciliationSummaryReports(reconciliationSummaryQuery.data?.reports);
   const warnings = summaryLines.filter((line) => !line.is_reconciled);
 
   return (
     <div className="space-y-6">
-      <div>
-        <h1 className="text-3xl font-bold text-foreground">Dashboard</h1>
-        <p className="text-muted-foreground mt-1">
-          Track commercial activity, posting readiness, settlement pressure, and accounting control signals.
-        </p>
+      <div className="flex items-start justify-between gap-4 flex-wrap">
+        <div>
+          <h1 className="text-3xl font-bold text-foreground">Dashboard</h1>
+          <p className="text-muted-foreground mt-1">
+            Track commercial activity, posting readiness, settlement pressure, and accounting control signals.
+          </p>
+          <div className="text-xs text-muted-foreground mt-2">
+            Last updated: {lastUpdatedAt ? new Date(lastUpdatedAt).toLocaleString() : "—"}
+            {isRefreshing ? " (updating…)" : ""}
+          </div>
+        </div>
+        <div className="flex items-center gap-2">
+          <Button variant="outline" className="gap-2" onClick={() => refetch()} disabled={isRefreshing}>
+            <RefreshCw className={`h-4 w-4 ${isRefreshing ? "animate-spin" : ""}`} />
+            Refresh
+          </Button>
+        </div>
       </div>
+
+      {errors.core || errors.workflow ? (
+        <Card className="border-amber-200 bg-amber-50/60">
+          <CardHeader className="pb-2">
+            <CardTitle className="text-sm font-medium flex items-center gap-2">
+              <AlertTriangle className="w-4 h-4 text-amber-600" />
+              Partial data
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="text-sm text-muted-foreground">
+            Some dashboard widgets could not be refreshed. Showing the most recent cached values where available.
+          </CardContent>
+        </Card>
+      ) : null}
 
       <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4">
         <StatCard title="Total Sales" value={formatCurrency(stats.totalSales)} icon={Wallet} trend="Posted accounting revenue" trendUp />

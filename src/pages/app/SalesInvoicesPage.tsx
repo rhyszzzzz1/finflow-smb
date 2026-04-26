@@ -55,11 +55,40 @@ export const SalesInvoicesPage = () => {
       ]}
       actions={[
         { label: "Submit", onClick: (item) => submitInvoice(item.id), visible: (item: any) => statusVisible(item.base_status || item.status, "draft", "rejected") },
-        { label: "Approve", onClick: (item) => approveInvoice(item.id), visible: (item: any) => statusVisible(item.base_status || item.status, "pending_approval", "draft") },
+        {
+          label: "Approve Invoice",
+          onClick: (item) => approveInvoice(item.id),
+          visible: (item: any) => statusVisible(item.base_status || item.status, "pending_approval", "draft"),
+          confirm: {
+            title: "Approve sales invoice",
+            confirmLabel: "Approve invoice",
+            description: "This approves the invoice for posting. Ensure amounts, tax, and counterparty are correct.",
+          },
+        },
         { label: "Reject", onClick: (item) => rejectInvoice(item.id, "Rejected from workflow page"), visible: (item: any) => statusVisible(item.base_status || item.status, "pending_approval") },
         { label: "Resubmit", onClick: (item) => resubmitInvoice(item.id), visible: (item: any) => statusVisible(item.base_status || item.status, "rejected") },
-        { label: "Post", onClick: (item) => postInvoice(item.id), visible: (item: any) => statusVisible(item.base_status || item.status, "approved") },
-        { label: "Void", onClick: (item) => voidInvoice(item.id), visible: (item: any) => !statusVisible(item.base_status || item.status, "void", "posted"), variant: "destructive" },
+        {
+          label: "Post Invoice",
+          onClick: (item) => postInvoice(item.id),
+          visible: (item: any) => statusVisible(item.base_status || item.status, "approved"),
+          confirm: {
+            title: "Post sales invoice",
+            confirmLabel: "Post invoice",
+            description: "Posting creates the accounting impact and makes the document read-only.",
+          },
+        },
+        {
+          label: "Void Invoice",
+          onClick: (item) => voidInvoice(item.id),
+          visible: (item: any) => !statusVisible(item.base_status || item.status, "void", "posted"),
+          variant: "destructive",
+          confirm: {
+            title: "Void sales invoice",
+            confirmLabel: "Void invoice",
+            description: "Voiding reverses the document’s operational intent. Use only when you must cancel this invoice.",
+            variant: "destructive",
+          },
+        },
       ]}
       stats={[
         { label: "Draft", value: String(invoices.filter((invoice) => statusVisible(invoice.base_status || invoice.status, "draft")).length) },

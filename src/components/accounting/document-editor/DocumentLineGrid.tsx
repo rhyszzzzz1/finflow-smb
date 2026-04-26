@@ -62,7 +62,14 @@ export function DocumentLineGrid({ config, itemOptions, expenseAccountOptions, l
                   {config.type === "purchase_bill" && config.allowServices && expenseAccountOptions ? (
                     <TableHead>Line type</TableHead>
                   ) : null}
-                  <TableHead>Item</TableHead>
+                  <TableHead className="min-w-[200px]">
+                    <div className="flex flex-col gap-0.5">
+                      <span>{config.itemColumnLabel ?? "Item"}</span>
+                      {config.itemColumnHint ? (
+                        <span className="text-xs font-normal text-muted-foreground leading-snug">{config.itemColumnHint}</span>
+                      ) : null}
+                    </div>
+                  </TableHead>
                   {config.type === "purchase_bill" && config.allowServices && expenseAccountOptions ? (
                     <TableHead>Expense account</TableHead>
                   ) : null}

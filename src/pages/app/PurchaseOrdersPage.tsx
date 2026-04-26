@@ -1,13 +1,25 @@
+import { useCallback } from "react";
 import { DocumentWorkflowPage } from "@/components/accounting/document-editor/DocumentWorkflowPage";
 import { useMasterData } from "@/hooks/useMasterData";
 import { usePurchaseOrders } from "@/hooks/usePurchaseOrders";
 import { statusVisible, today } from "./documentPageUtils";
-import type { DocumentTypeConfig } from "@/components/accounting/document-editor/documentTypes";
-import { purchaseOrderApi } from "@/services/api";
+import type { DocumentTypeConfig, SelectOption } from "@/components/accounting/document-editor/documentTypes";
+import { inventoryApi, purchaseOrderApi } from "@/services/api";
 
 export const PurchaseOrdersPage = () => {
   const { vendorOptions, itemOptions } = useMasterData();
   const { purchaseOrders, isLoading, createDraft, updateDraft, approveOrder, voidOrder } = usePurchaseOrders();
+
+  const resolveItemOptionsForVendor = useCallback(async (vendorRef: string) => {
+    const data = await inventoryApi.getItemsForPurchase(vendorRef);
+    const rows = Array.isArray(data?.items) ? data.items : [];
+    const options: SelectOption[] = rows.map((row: any) => ({
+      value: String(row.id),
+      label: `${row.name || "Item"}${row.sku ? ` (${row.sku})` : ""}${row.vendor_sku ? ` — supplier SKU: ${row.vendor_sku}` : ""}`,
+      meta: row,
+    }));
+    return { filterActive: Boolean(data?.filterActive), options };
+  }, []);
 
   const config: DocumentTypeConfig = {
     type: "purchase_order",
@@ -22,12 +34,16 @@ export const PurchaseOrdersPage = () => {
     supportsSources: false,
     supportsUnitPrice: false,
     supportsUnitCost: true,
+    itemColumnLabel: "Your item master",
+    itemColumnHint:
+      "Optional. Pick a vendor first: if you linked items to them in Inventory, only those show here (you can show all). Otherwise use Description.",
+    itemSelectPlaceholder: "Optional internal SKU",
   };
 
   return (
     <DocumentWorkflowPage
       title="Purchase Orders"
-      description="Prepare supplier orders before receiving stock or matching supplier invoices."
+      description="Order from a vendor using line description, quantity, and unit cost — that is what you ask them to supply. Linking an internal item is optional: it helps goods receipts hit the right stock record and is separate from anything the vendor lists in their own inventory. Tie items to suppliers under Inventory when you use registered vendors."
       config={config}
       isLoading={isLoading}
       items={purchaseOrders}
@@ -42,11 +58,32 @@ export const PurchaseOrdersPage = () => {
         { header: "Received Qty", align: "right", render: (item: any) => Number(item.received_quantity || 0).toFixed(2) },
       ]}
       actions={[
-        { label: "Approve", onClick: (item: any) => approveOrder(item.id), visible: (item: any) => statusVisible(item.status, "draft") },
-        { label: "Void", onClick: (item: any) => voidOrder(item.id), visible: (item: any) => !statusVisible(item.status, "void", "approved"), variant: "destructive" },
+        {
+          label: "Approve Purchase Order",
+          onClick: (item: any) => approveOrder(item.id),
+          visible: (item: any) => statusVisible(item.status, "draft"),
+          confirm: {
+            title: "Approve purchase order",
+            confirmLabel: "Approve PO",
+            description: "Approval signals the order is ready to be issued and received against.",
+          },
+        },
+        {
+          label: "Void Purchase Order",
+          onClick: (item: any) => voidOrder(item.id),
+          visible: (item: any) => !statusVisible(item.status, "void", "approved"),
+          variant: "destructive",
+          confirm: {
+            title: "Void purchase order",
+            confirmLabel: "Void PO",
+            description: "Void only when you must cancel the order. If partially received, review stock receipts first.",
+            variant: "destructive",
+          },
+        },
       ]}
       counterpartyOptions={vendorOptions}
       itemOptions={itemOptions}
+      resolveItemOptionsForVendor={resolveItemOptionsForVendor}
       extraFields={[{ key: "expected_date", label: "Expected Date", type: "date" }]}
       createInitialState={{
         header: { vendor_id: "", order_date: today(), expected_date: today(), notes: "" },

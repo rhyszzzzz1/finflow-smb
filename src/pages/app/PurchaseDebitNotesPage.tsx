@@ -42,9 +42,38 @@ export const PurchaseDebitNotesPage = () => {
         { header: "Return Vendor", align: "center", render: (item: any) => item.return_to_vendor ? "Yes" : "No" },
       ]}
       actions={[
-        { label: "Approve", onClick: (item: any) => approveDebitNote(item.id), visible: (item: any) => statusVisible(item.status, "draft") },
-        { label: "Post", onClick: (item: any) => postDebitNote(item.id), visible: (item: any) => statusVisible(item.status, "approved") },
-        { label: "Void", onClick: (item: any) => voidDebitNote(item.id), visible: (item: any) => !statusVisible(item.status, "void", "posted"), variant: "destructive" },
+        {
+          label: "Approve Debit Note",
+          onClick: (item: any) => approveDebitNote(item.id),
+          visible: (item: any) => statusVisible(item.status, "draft"),
+          confirm: {
+            title: "Approve purchase debit note",
+            confirmLabel: "Approve debit note",
+            description: "Approving moves the debit note to posting. Confirm related bill and return-to-vendor selection.",
+          },
+        },
+        {
+          label: "Post Debit Note",
+          onClick: (item: any) => postDebitNote(item.id),
+          visible: (item: any) => statusVisible(item.status, "approved"),
+          confirm: {
+            title: "Post purchase debit note",
+            confirmLabel: "Post debit note",
+            description: "Posting creates the accounting reversal and makes the document read-only.",
+          },
+        },
+        {
+          label: "Void Debit Note",
+          onClick: (item: any) => voidDebitNote(item.id),
+          visible: (item: any) => !statusVisible(item.status, "void", "posted"),
+          variant: "destructive",
+          confirm: {
+            title: "Void purchase debit note",
+            confirmLabel: "Void debit note",
+            description: "Void only when you must cancel this debit note. If posted, you may need a correcting entry instead.",
+            variant: "destructive",
+          },
+        },
       ]}
       counterpartyOptions={vendorOptions}
       itemOptions={itemOptions}

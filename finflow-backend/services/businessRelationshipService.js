@@ -10,6 +10,86 @@ class BusinessRelationshipService {
     }
     this.pool = pool;
     this.idFactory = options.idFactory || (() => crypto.randomUUID());
+    this.counterpartyService = options.counterpartyService || null;
+  }
+
+  /**
+   * Sales/procurement dropdowns read legacy `clients` / `vendors` by user_id (profile).
+   * Mirror accepted relationships into those tables so each side sees the other party by name.
+   */
+  async syncLegacyCounterpartiesFromRelationship(conn, row) {
+    if (!this.counterpartyService || !row || row.relationship_status !== "accepted") return;
+
+    const buyerPid = row.buyer_profile_id ? String(row.buyer_profile_id).trim() : null;
+    const sellerPid = row.seller_profile_id ? String(row.seller_profile_id).trim() : null;
+    if (!buyerPid || !sellerPid) return;
+
+    const loadProfile = async (profileId) =>
+      this.queryOne(
+        conn,
+        `SELECT id, name, email, business_name, gst_number, address
+           FROM profiles
+          WHERE id = ?
+            AND COALESCE(is_admin, 0) = 0
+          LIMIT 1`,
+        [profileId]
+      );
+
+    // Seller's customer list: the buyer
+    const existingClient = await this.queryOne(
+      conn,
+      `SELECT id FROM clients WHERE user_id = ? AND linked_profile_id = ? LIMIT 1`,
+      [sellerPid, buyerPid]
+    );
+    if (!existingClient) {
+      const buyerProf = await loadProfile(buyerPid);
+      if (buyerProf) {
+        const clientName = buyerProf.business_name || buyerProf.name || buyerProf.email || "Customer";
+        const sellerCompanyId = await this.counterpartyService.resolveCompanyId(conn, sellerPid);
+        const counterparty = await this.counterpartyService.promoteToCanonical(conn, sellerCompanyId, "customer", {
+          linked_profile_id: buyerPid,
+          display_name: clientName,
+          legal_name: buyerProf.business_name || buyerProf.name || clientName,
+          tax_number: buyerProf.gst_number || null,
+          email: buyerProf.email || null,
+          address: buyerProf.address || null,
+        });
+        const legacyClientId = this.idFactory();
+        await conn.execute(
+          `INSERT INTO clients (id, user_id, linked_profile_id, counterparty_id, client_name, email)
+           VALUES (?, ?, ?, ?, ?, ?)`,
+          sqlParams([legacyClientId, sellerPid, buyerPid, counterparty.id, clientName, buyerProf.email || null])
+        );
+      }
+    }
+
+    // Buyer's vendor list: the seller
+    const existingVendor = await this.queryOne(
+      conn,
+      `SELECT id FROM vendors WHERE user_id = ? AND linked_profile_id = ? LIMIT 1`,
+      [buyerPid, sellerPid]
+    );
+    if (!existingVendor) {
+      const sellerProf = await loadProfile(sellerPid);
+      if (sellerProf) {
+        const vendorName = sellerProf.business_name || sellerProf.name || sellerProf.email || "Vendor";
+        const buyerCompanyId = await this.counterpartyService.resolveCompanyId(conn, buyerPid);
+        const counterparty = await this.counterpartyService.promoteToCanonical(conn, buyerCompanyId, "vendor", {
+          linked_profile_id: sellerPid,
+          display_name: vendorName,
+          legal_name: sellerProf.business_name || sellerProf.name || vendorName,
+          tax_number: sellerProf.gst_number || null,
+          email: sellerProf.email || null,
+          address: sellerProf.address || null,
+        });
+        const legacyVendorId = this.idFactory();
+        await conn.execute(
+          `INSERT INTO vendors (id, user_id, linked_profile_id, counterparty_id, vendor_name, email)
+           VALUES (?, ?, ?, ?, ?, ?)`,
+          sqlParams([legacyVendorId, buyerPid, sellerPid, counterparty.id, vendorName, sellerProf.email || null])
+        );
+      }
+    }
   }
 
   async queryAll(conn, sql, params = []) {
@@ -162,7 +242,13 @@ class BusinessRelationshipService {
     throw new Error("Unable to resolve company context");
   }
 
-  async hydrateRelationship(conn, row, viewerCompanyId = null) {
+  sid(value) {
+    if (value === undefined || value === null) return null;
+    const s = String(value).trim();
+    return s || null;
+  }
+
+  async hydrateRelationship(conn, row, viewerCompanyId = null, viewerProfileId = null) {
     if (!row) return null;
 
     const buyer = await this.resolveCompanyContext(conn, {
@@ -174,19 +260,37 @@ class BusinessRelationshipService {
       profileId: row.seller_profile_id,
     });
 
+    const vc = this.sid(viewerCompanyId);
+    const vp = this.sid(viewerProfileId);
+    const buyerC = this.sid(row.buyer_company_id);
+    const sellerC = this.sid(row.seller_company_id);
+    const buyerP = this.sid(row.buyer_profile_id);
+    const sellerP = this.sid(row.seller_profile_id);
+
+    const matchesBuyer = (vc && buyerC && vc === buyerC) || (vp && buyerP && vp === buyerP);
+    const matchesSeller = (vc && sellerC && vc === sellerC) || (vp && sellerP && vp === sellerP);
+
+    let viewer_role = null;
+    if (matchesBuyer && !matchesSeller) viewer_role = "buyer";
+    else if (matchesSeller && !matchesBuyer) viewer_role = "seller";
+    else if (matchesBuyer) viewer_role = "buyer";
+    else if (matchesSeller) viewer_role = "seller";
+
+    const counterparty_company_id =
+      viewer_role === "buyer" ? row.seller_company_id : viewer_role === "seller" ? row.buyer_company_id : null;
+    const counterparty_profile_id =
+      viewer_role === "buyer" ? row.seller_profile_id : viewer_role === "seller" ? row.buyer_profile_id : null;
+    const counterparty_name =
+      viewer_role === "buyer" ? seller.display_name : viewer_role === "seller" ? buyer.display_name : null;
+
     return {
       ...row,
       buyer_name: buyer.display_name,
       seller_name: seller.display_name,
-      counterparty_company_id: viewerCompanyId
-        ? (viewerCompanyId === row.buyer_company_id ? row.seller_company_id : row.buyer_company_id)
-        : null,
-      counterparty_profile_id: viewerCompanyId
-        ? (viewerCompanyId === row.buyer_company_id ? row.seller_profile_id : row.buyer_profile_id)
-        : null,
-      viewer_role: viewerCompanyId
-        ? (viewerCompanyId === row.buyer_company_id ? "buyer" : viewerCompanyId === row.seller_company_id ? "seller" : null)
-        : null,
+      counterparty_company_id,
+      counterparty_profile_id,
+      counterparty_name,
+      viewer_role,
     };
   }
 
@@ -251,7 +355,8 @@ class BusinessRelationshipService {
       return this.hydrateRelationship(
         conn,
         await this.queryOne(conn, `SELECT * FROM business_relationships WHERE id = ?`, [existing.id]),
-        payload.viewer_company_id || payload.company_id || payload.created_by_company_id || null
+        payload.viewer_company_id || payload.company_id || payload.created_by_company_id || null,
+        payload.viewer_profile_id || null
       );
     }
 
@@ -280,7 +385,8 @@ class BusinessRelationshipService {
     return this.hydrateRelationship(
       conn,
       await this.queryOne(conn, `SELECT * FROM business_relationships WHERE id = ?`, [relationshipId]),
-      payload.viewer_company_id || payload.company_id || payload.created_by_company_id || null
+      payload.viewer_company_id || payload.company_id || payload.created_by_company_id || null,
+      payload.viewer_profile_id || null
     );
   }
 
@@ -322,7 +428,7 @@ class BusinessRelationshipService {
 
       const existing = await this.findByPair(conn, buyer.company_id, seller.company_id);
       if (existing?.relationship_status === "accepted" || existing?.relationship_status === "invited") {
-        return this.hydrateRelationship(conn, existing, actor.company_id);
+        return this.hydrateRelationship(conn, existing, actor.company_id, actor.profile_id);
       }
       if (existing?.relationship_status === "blocked") {
         throw new Error("Business relationship is blocked");
@@ -382,7 +488,8 @@ class BusinessRelationshipService {
       return this.hydrateRelationship(
         conn,
         await this.queryOne(conn, `SELECT * FROM business_relationships WHERE id = ?`, [relationshipId]),
-        actor.company_id
+        actor.company_id,
+        actor.profile_id
       );
     });
   }
@@ -428,11 +535,10 @@ class BusinessRelationshipService {
         );
       }
 
-      return this.hydrateRelationship(
-        conn,
-        await this.queryOne(conn, `SELECT * FROM business_relationships WHERE id = ?`, [relationshipId]),
-        actor.company_id
-      );
+      const updated = await this.queryOne(conn, `SELECT * FROM business_relationships WHERE id = ?`, [relationshipId]);
+      await this.syncLegacyCounterpartiesFromRelationship(conn, updated);
+
+      return this.hydrateRelationship(conn, updated, actor.company_id, actor.profile_id);
     });
   }
 
@@ -442,7 +548,7 @@ class BusinessRelationshipService {
       const actor = await this.resolveCompanyContext(conn, { actorUserId });
       const onlyActive = options.onlyActive === true;
       const status = this.text(options.status);
-      const params = [actor.company_id, actor.company_id];
+      const params = [actor.company_id, actor.company_id, actor.profile_id, actor.profile_id];
       let statusClause = "";
       if (onlyActive) {
         statusClause = ` AND br.relationship_status = 'accepted'`;
@@ -455,7 +561,12 @@ class BusinessRelationshipService {
         conn,
         `SELECT br.*
            FROM business_relationships br
-          WHERE (br.buyer_company_id = ? OR br.seller_company_id = ?)
+          WHERE (
+                  br.buyer_company_id = ?
+               OR br.seller_company_id = ?
+               OR br.buyer_profile_id = ?
+               OR br.seller_profile_id = ?
+                )
             ${statusClause}
           ORDER BY br.updated_at DESC`,
         params
@@ -463,7 +574,7 @@ class BusinessRelationshipService {
 
       const hydrated = [];
       for (const row of rows) {
-        hydrated.push(await this.hydrateRelationship(conn, row, actor.company_id));
+        hydrated.push(await this.hydrateRelationship(conn, row, actor.company_id, actor.profile_id));
       }
       return hydrated;
     } finally {
@@ -472,7 +583,11 @@ class BusinessRelationshipService {
   }
 
   async resolveActiveRelationship(conn, payload = {}) {
-    const actorCompanyId = payload.companyId || await this.resolveCompanyContext(conn, { actorUserId: payload.actorUserId }).then((ctx) => ctx.company_id);
+    const actorCtx = payload.actorUserId
+      ? await this.resolveCompanyContext(conn, { actorUserId: payload.actorUserId })
+      : null;
+    const actorCompanyId = payload.companyId || actorCtx?.company_id;
+    const actorProfileId = this.sid(actorCtx?.profile_id);
     const perspective = payload.perspective;
     if (!["buyer", "seller"].includes(perspective)) {
       throw new Error("perspective must be buyer or seller");
@@ -492,14 +607,21 @@ class BusinessRelationshipService {
         throw new Error("Business relationship not found or not accepted");
       }
 
-      if (perspective === "seller" && existing.seller_company_id !== actorCompanyId) {
+      const sellerOk =
+        this.sid(existing.seller_company_id) === this.sid(actorCompanyId) ||
+        (actorProfileId && this.sid(existing.seller_profile_id) === actorProfileId);
+      const buyerOk =
+        this.sid(existing.buyer_company_id) === this.sid(actorCompanyId) ||
+        (actorProfileId && this.sid(existing.buyer_profile_id) === actorProfileId);
+
+      if (perspective === "seller" && !sellerOk) {
         throw new Error("Business relationship does not match seller context");
       }
-      if (perspective === "buyer" && existing.buyer_company_id !== actorCompanyId) {
+      if (perspective === "buyer" && !buyerOk) {
         throw new Error("Business relationship does not match buyer context");
       }
 
-      return this.hydrateRelationship(conn, existing, actorCompanyId);
+      return this.hydrateRelationship(conn, existing, actorCompanyId, actorProfileId);
     }
 
     const targetProfileId = payload.counterpartyLinkedProfileId || null;
@@ -508,23 +630,49 @@ class BusinessRelationshipService {
     }
 
     const targetContext = await this.resolveCompanyContext(conn, { profileId: targetProfileId });
-    const query = perspective === "seller"
-      ? `SELECT *
-           FROM business_relationships
-          WHERE seller_company_id = ?
-            AND buyer_company_id = ?
-            AND relationship_status = 'accepted'
-          LIMIT 1`
-      : `SELECT *
-           FROM business_relationships
-          WHERE buyer_company_id = ?
-            AND seller_company_id = ?
-            AND relationship_status = 'accepted'
-          LIMIT 1`;
-
     const targetCompanyId = targetContext?.company_id ?? null;
-    const relationship = await this.queryOne(conn, query, [actorCompanyId, targetCompanyId]).catch(() => null);
-    return this.hydrateRelationship(conn, relationship, actorCompanyId);
+    const targetProfileResolved = this.sid(targetProfileId);
+
+    const query =
+      perspective === "seller"
+        ? `SELECT *
+             FROM business_relationships
+            WHERE relationship_status = 'accepted'
+              AND (
+                    seller_company_id = ?
+                 OR (? IS NOT NULL AND seller_profile_id = ?)
+                  )
+              AND (
+                    buyer_company_id = ?
+                 OR (? IS NOT NULL AND buyer_profile_id = ?)
+                  )
+            LIMIT 1`
+        : `SELECT *
+             FROM business_relationships
+            WHERE relationship_status = 'accepted'
+              AND (
+                    buyer_company_id = ?
+                 OR (? IS NOT NULL AND buyer_profile_id = ?)
+                  )
+              AND (
+                    seller_company_id = ?
+                 OR (? IS NOT NULL AND seller_profile_id = ?)
+                  )
+            LIMIT 1`;
+
+    const relationship = await this.queryOne(
+      conn,
+      query,
+      sqlParams([
+        actorCompanyId,
+        actorProfileId,
+        actorProfileId,
+        targetCompanyId,
+        targetProfileResolved,
+        targetProfileResolved,
+      ])
+    ).catch(() => null);
+    return this.hydrateRelationship(conn, relationship, actorCompanyId, actorProfileId);
   }
 }
 

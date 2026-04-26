@@ -72,8 +72,36 @@ export const useMasterData = () => {
       const receiptList = Array.isArray(unwrap(receiptRows)) ? unwrap(receiptRows) : unwrap(receiptRows)?.data || [];
       const purchaseBillList = Array.isArray(unwrap(purchaseBillRows)) ? unwrap(purchaseBillRows) : unwrap(purchaseBillRows)?.data || [];
 
-      setCustomers(toOptions(customerList, "id", (row) => row.client_name || row.customer_name || row.name || row.email || row.id));
-      setVendors(toOptions(vendorList, "id", (row) => row.vendor_name || row.name || row.email || row.id));
+      // Prefer canonical counterparty id so Select values match persisted document headers (vendor_id / client_id).
+      const buildUniqueOptions = (rows: any[], mapRow: (row: any) => Option): Option[] => {
+        const seen = new Set<string>();
+        const out: Option[] = [];
+        for (const row of rows) {
+          const opt = mapRow(row);
+          const v = String(opt.value || "").trim();
+          if (!v || seen.has(v)) continue;
+          seen.add(v);
+          out.push({ ...opt, value: v, label: String(opt.label || "").trim() || v });
+        }
+        return out;
+      };
+
+      setCustomers(
+        buildUniqueOptions(customerList, (row: any) => ({
+          value: String(row.counterparty_id || row.id),
+          label: String(
+            row.client_name || row.display_name || row.customer_name || row.name || row.email || row.counterparty_id || row.id
+          ),
+          meta: row,
+        }))
+      );
+      setVendors(
+        buildUniqueOptions(vendorList, (row: any) => ({
+          value: String(row.counterparty_id || row.id),
+          label: String(row.vendor_name || row.display_name || row.name || row.email || row.counterparty_id || row.id),
+          meta: row,
+        }))
+      );
       setItems(toOptions(itemList, "id", (row) => `${row.name || row.product_name || row.description || "Unnamed Item"}${row.sku ? ` (${row.sku})` : ""}`));
       setWarehouses(toOptions(warehouseList, "id", (row) => `${row.name || row.warehouse_name || row.code || row.id}${row.code ? ` (${row.code})` : ""}`));
       setRegisteredAccounts(toOptions(accountList, "id", (row) => `${row.business_name || row.name || row.email}${row.email ? ` (${row.email})` : ""}`));

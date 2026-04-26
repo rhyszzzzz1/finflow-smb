@@ -1,9 +1,34 @@
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue, SELECT_VALUE_NONE } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import type { DocumentTypeConfig, SelectOption } from "./documentTypes";
+
+function counterpartyDisplayLabel(
+  config: DocumentTypeConfig,
+  id: string,
+  counterpartyOptions: SelectOption[],
+  header: Record<string, unknown>
+): string {
+  if (!id) return "";
+  const direct = counterpartyOptions.find((o) => o.value === id);
+  if (direct?.label && String(direct.label).trim()) return String(direct.label).trim();
+  const byLegacy = counterpartyOptions.find((o) => {
+    const m = o.meta as { id?: string } | undefined;
+    return m?.id != null && String(m.id) === id;
+  });
+  if (byLegacy?.label && String(byLegacy.label).trim()) return String(byLegacy.label).trim();
+  if (config.counterpartyField === "customer_id") {
+    const n = String(header.customer_name || "").trim();
+    if (n) return n;
+  }
+  if (config.counterpartyField === "vendor_id") {
+    const n = String(header.vendor_name || "").trim();
+    if (n) return n;
+  }
+  return id;
+}
 
 export type DocumentHeaderReferences = {
   sourceSalesQuoteOptions?: SelectOption[];
@@ -52,8 +77,14 @@ export function DocumentHeaderFields({
     onChange(patch);
   };
 
-  const counterpartyValue = String((header as Record<string, unknown>)[config.counterpartyField] || "");
+  const counterpartyRaw = (header as Record<string, unknown>)[config.counterpartyField];
+  const counterpartyId =
+    counterpartyRaw != null && String(counterpartyRaw).trim() !== "" ? String(counterpartyRaw).trim() : "";
+  const counterpartySelectValue = counterpartyId ? counterpartyId : SELECT_VALUE_NONE;
   const dateValue = String((header as Record<string, unknown>)[config.dateField] || "");
+  const hasCounterpartyOption =
+    Boolean(counterpartyId) && counterpartyOptions.some((o) => o.value === counterpartyId);
+  const counterpartyShownLabel = counterpartyDisplayLabel(config, counterpartyId, counterpartyOptions, header as Record<string, unknown>);
 
   return (
     <Card className="bg-card border-border">
@@ -65,18 +96,45 @@ export function DocumentHeaderFields({
           <div className="grid gap-2">
             <Label>{config.counterpartyLabel}</Label>
             {readOnly ? (
-              <div className="text-sm">{counterpartyOptions.find((o) => o.value === counterpartyValue)?.label || counterpartyValue || "-"}</div>
+              <div className="text-sm">{counterpartyShownLabel || counterpartyId || "-"}</div>
             ) : (
-              <Select value={counterpartyValue} onValueChange={(value) => set({ [config.counterpartyField]: value })} disabled={!canEdit}>
+              <Select
+                value={counterpartySelectValue}
+                onValueChange={(value) => {
+                  const nextId = value === SELECT_VALUE_NONE ? "" : value;
+                  const opt = counterpartyOptions.find((o) => o.value === nextId);
+                  const label = opt?.label != null ? String(opt.label).trim() : "";
+                  const patch: Record<string, unknown> = {
+                    [config.counterpartyField]: nextId,
+                  };
+                  if (config.counterpartyField === "customer_id") {
+                    patch.customer_name = nextId ? label || null : "";
+                  } else if (config.counterpartyField === "vendor_id") {
+                    patch.vendor_name = nextId ? label || null : "";
+                  }
+                  set(patch);
+                }}
+                disabled={!canEdit}
+              >
                 <SelectTrigger>
                   <SelectValue placeholder={`Select ${config.counterpartyLabel.toLowerCase()}`} />
                 </SelectTrigger>
                 <SelectContent className="bg-popover border border-border">
-                  {counterpartyOptions.map((opt) => (
-                    <SelectItem key={opt.value} value={opt.value}>
-                      {opt.label}
+                  <SelectItem value={SELECT_VALUE_NONE}>
+                    <span className="text-muted-foreground">{`Select ${config.counterpartyLabel.toLowerCase()}`}</span>
+                  </SelectItem>
+                  {counterpartyId && !hasCounterpartyOption ? (
+                    <SelectItem value={counterpartyId}>
+                      {counterpartyShownLabel || counterpartyId}
                     </SelectItem>
-                  ))}
+                  ) : null}
+                  {counterpartyOptions
+                    .filter((opt) => opt.value !== "" && opt.value !== SELECT_VALUE_NONE)
+                    .map((opt) => (
+                      <SelectItem key={opt.value} value={opt.value}>
+                        {opt.label || opt.value}
+                      </SelectItem>
+                    ))}
                 </SelectContent>
               </Select>
             )}
@@ -116,11 +174,13 @@ export function DocumentHeaderFields({
                       <SelectValue placeholder={field.placeholder || `Select ${field.label.toLowerCase()}`} />
                     </SelectTrigger>
                     <SelectContent className="bg-popover border border-border">
-                      {(field.options || []).map((opt) => (
-                        <SelectItem key={opt.value} value={opt.value}>
-                          {opt.label}
-                        </SelectItem>
-                      ))}
+                      {(field.options || [])
+                        .filter((opt) => opt.value !== "")
+                        .map((opt) => (
+                          <SelectItem key={opt.value} value={opt.value}>
+                            {opt.label}
+                          </SelectItem>
+                        ))}
                     </SelectContent>
                   </Select>
                 ) : (
@@ -163,13 +223,16 @@ export function DocumentHeaderFields({
                       "-"}
                   </div>
                 ) : (
-                  <Select value={String(header.sales_quote_id || "")} onValueChange={(v) => set({ sales_quote_id: v || "" })}>
+                  <Select
+                    value={String(header.sales_quote_id || "") ? String(header.sales_quote_id) : SELECT_VALUE_NONE}
+                    onValueChange={(v) => set({ sales_quote_id: v === SELECT_VALUE_NONE ? "" : v })}
+                  >
                     <SelectTrigger>
                       <SelectValue placeholder="Optional quote link" />
                     </SelectTrigger>
                     <SelectContent className="bg-popover border border-border">
-                      <SelectItem value="">None</SelectItem>
-                      {references.sourceSalesQuoteOptions.map((opt) => (
+                      <SelectItem value={SELECT_VALUE_NONE}>None</SelectItem>
+                      {references.sourceSalesQuoteOptions.filter((opt) => opt.value !== "").map((opt) => (
                         <SelectItem key={opt.value} value={opt.value}>
                           {opt.label}
                         </SelectItem>
@@ -190,13 +253,16 @@ export function DocumentHeaderFields({
                       "-"}
                   </div>
                 ) : (
-                  <Select value={String(header.sales_order_id || "")} onValueChange={(v) => set({ sales_order_id: v || "" })}>
+                  <Select
+                    value={String(header.sales_order_id || "") ? String(header.sales_order_id) : SELECT_VALUE_NONE}
+                    onValueChange={(v) => set({ sales_order_id: v === SELECT_VALUE_NONE ? "" : v })}
+                  >
                     <SelectTrigger>
                       <SelectValue placeholder="Optional order link" />
                     </SelectTrigger>
                     <SelectContent className="bg-popover border border-border">
-                      <SelectItem value="">None</SelectItem>
-                      {references.sourceSalesOrderOptions.map((opt) => (
+                      <SelectItem value={SELECT_VALUE_NONE}>None</SelectItem>
+                      {references.sourceSalesOrderOptions.filter((opt) => opt.value !== "").map((opt) => (
                         <SelectItem key={opt.value} value={opt.value}>
                           {opt.label}
                         </SelectItem>
@@ -217,13 +283,16 @@ export function DocumentHeaderFields({
                       "-"}
                   </div>
                 ) : (
-                  <Select value={String(header.purchase_order_id || "")} onValueChange={(v) => set({ purchase_order_id: v || "" })}>
+                  <Select
+                    value={String(header.purchase_order_id || "") ? String(header.purchase_order_id) : SELECT_VALUE_NONE}
+                    onValueChange={(v) => set({ purchase_order_id: v === SELECT_VALUE_NONE ? "" : v })}
+                  >
                     <SelectTrigger>
                       <SelectValue placeholder="Optional PO link" />
                     </SelectTrigger>
                     <SelectContent className="bg-popover border border-border">
-                      <SelectItem value="">None</SelectItem>
-                      {references.sourcePurchaseOrderOptions.map((opt) => (
+                      <SelectItem value={SELECT_VALUE_NONE}>None</SelectItem>
+                      {references.sourcePurchaseOrderOptions.filter((opt) => opt.value !== "").map((opt) => (
                         <SelectItem key={opt.value} value={opt.value}>
                           {opt.label}
                         </SelectItem>
@@ -244,13 +313,16 @@ export function DocumentHeaderFields({
                       "-"}
                   </div>
                 ) : (
-                  <Select value={String(header.goods_receipt_id || "")} onValueChange={(v) => set({ goods_receipt_id: v || "" })}>
+                  <Select
+                    value={String(header.goods_receipt_id || "") ? String(header.goods_receipt_id) : SELECT_VALUE_NONE}
+                    onValueChange={(v) => set({ goods_receipt_id: v === SELECT_VALUE_NONE ? "" : v })}
+                  >
                     <SelectTrigger>
                       <SelectValue placeholder="Optional GRN link" />
                     </SelectTrigger>
                     <SelectContent className="bg-popover border border-border">
-                      <SelectItem value="">None</SelectItem>
-                      {references.sourceGoodsReceiptOptions.map((opt) => (
+                      <SelectItem value={SELECT_VALUE_NONE}>None</SelectItem>
+                      {references.sourceGoodsReceiptOptions.filter((opt) => opt.value !== "").map((opt) => (
                         <SelectItem key={opt.value} value={opt.value}>
                           {opt.label}
                         </SelectItem>
@@ -271,13 +343,16 @@ export function DocumentHeaderFields({
                       "-"}
                   </div>
                 ) : (
-                  <Select value={String(header.related_sales_invoice_id || "")} onValueChange={(v) => set({ related_sales_invoice_id: v || "" })}>
+                  <Select
+                    value={String(header.related_sales_invoice_id || "") ? String(header.related_sales_invoice_id) : SELECT_VALUE_NONE}
+                    onValueChange={(v) => set({ related_sales_invoice_id: v === SELECT_VALUE_NONE ? "" : v })}
+                  >
                     <SelectTrigger>
                       <SelectValue placeholder="Optional reference invoice" />
                     </SelectTrigger>
                     <SelectContent className="bg-popover border border-border">
-                      <SelectItem value="">None</SelectItem>
-                      {references.sourceSalesInvoiceOptions.map((opt) => (
+                      <SelectItem value={SELECT_VALUE_NONE}>None</SelectItem>
+                      {references.sourceSalesInvoiceOptions.filter((opt) => opt.value !== "").map((opt) => (
                         <SelectItem key={opt.value} value={opt.value}>
                           {opt.label}
                         </SelectItem>
@@ -298,13 +373,16 @@ export function DocumentHeaderFields({
                       "-"}
                   </div>
                 ) : (
-                  <Select value={String(header.related_purchase_bill_id || "")} onValueChange={(v) => set({ related_purchase_bill_id: v || "" })}>
+                  <Select
+                    value={String(header.related_purchase_bill_id || "") ? String(header.related_purchase_bill_id) : SELECT_VALUE_NONE}
+                    onValueChange={(v) => set({ related_purchase_bill_id: v === SELECT_VALUE_NONE ? "" : v })}
+                  >
                     <SelectTrigger>
                       <SelectValue placeholder="Optional source bill" />
                     </SelectTrigger>
                     <SelectContent className="bg-popover border border-border">
-                      <SelectItem value="">None</SelectItem>
-                      {references.sourcePurchaseBillOptions.map((opt) => (
+                      <SelectItem value={SELECT_VALUE_NONE}>None</SelectItem>
+                      {references.sourcePurchaseBillOptions.filter((opt) => opt.value !== "").map((opt) => (
                         <SelectItem key={opt.value} value={opt.value}>
                           {opt.label}
                         </SelectItem>

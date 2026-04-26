@@ -29,14 +29,19 @@ function createReportsDb() {
     }
 
     if (q.includes("FROM sales_invoice_headers") && q.includes("posted_journal_entry_id IS NOT NULL") && q.includes("invoice_date BETWEEN")) {
+      const companyId = params[0];
+      const scopeId = params[1];
+      const custId = params[2];
+      const startP = params[3];
+      const endP = params[4];
       const rows = state.salesInvoiceHeaders
         .filter((row) =>
-          row.user_id === params[0]
-          && String(row.counterparty_id || row.customer_id) === String(params[1])
+          (row.company_id === companyId || (row.company_id == null && row.user_id === scopeId))
+          && String(row.counterparty_id || row.customer_id) === String(custId)
           && row.posted_journal_entry_id
           && row.status !== "void"
-          && row.invoice_date >= params[2]
-          && row.invoice_date <= params[3]
+          && row.invoice_date >= startP
+          && row.invoice_date <= endP
         )
         .map((row) => ({
           document_id: row.id,
@@ -50,14 +55,19 @@ function createReportsDb() {
     }
 
     if (q.includes("FROM purchase_bill_headers") && q.includes("posted_journal_entry_id IS NOT NULL") && q.includes("bill_date BETWEEN")) {
+      const companyId = params[0];
+      const scopeId = params[1];
+      const vendId = params[2];
+      const startP = params[3];
+      const endP = params[4];
       const rows = state.purchaseBillHeaders
         .filter((row) =>
-          row.user_id === params[0]
-          && String(row.counterparty_id || row.vendor_id) === String(params[1])
+          (row.company_id === companyId || (row.company_id == null && row.user_id === scopeId))
+          && String(row.counterparty_id || row.vendor_id) === String(vendId)
           && row.posted_journal_entry_id
           && row.status !== "void"
-          && row.bill_date >= params[2]
-          && row.bill_date <= params[3]
+          && row.bill_date >= startP
+          && row.bill_date <= endP
         )
         .map((row) => ({
           document_id: row.id,
@@ -158,14 +168,15 @@ function createReportsDb() {
 
     if (q.includes("FROM sales_invoice_headers si") && q.includes("GROUP BY si.id")) {
       const asOfDate = params[0];
-      const userId = params[1];
-      const invoiceDate = params[2];
+      const companyId = params[1];
+      const scopeId = params[2];
+      const invoiceDateCutoff = params[3];
       const rows = state.salesInvoiceHeaders
         .filter((row) =>
-          row.user_id === userId
+          (row.company_id === companyId || (row.company_id == null && row.user_id === scopeId))
           && row.posted_journal_entry_id
           && row.status !== "void"
-          && row.invoice_date <= invoiceDate
+          && row.invoice_date <= invoiceDateCutoff
         )
         .map((row) => {
           const applied = state.paymentAllocations

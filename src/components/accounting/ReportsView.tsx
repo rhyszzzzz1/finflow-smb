@@ -321,7 +321,9 @@ export const ReportsView = () => {
                   <SelectTrigger><SelectValue placeholder="Select customer" /></SelectTrigger>
                   <SelectContent className="bg-popover border border-border">
                     {salesClients.map((client) => (
-                      <SelectItem key={client.id} value={client.id}>{client.client_name}</SelectItem>
+                      <SelectItem key={client.id} value={String(client.counterparty_id || client.id)}>
+                        {client.client_name}
+                      </SelectItem>
                     ))}
                   </SelectContent>
                 </Select>
@@ -361,7 +363,9 @@ export const ReportsView = () => {
                   <SelectTrigger><SelectValue placeholder="Select vendor" /></SelectTrigger>
                   <SelectContent className="bg-popover border border-border">
                     {purchaseVendors.map((vendor) => (
-                      <SelectItem key={vendor.id} value={vendor.id}>{vendor.vendor_name}</SelectItem>
+                      <SelectItem key={vendor.id} value={String(vendor.counterparty_id || vendor.id)}>
+                        {vendor.vendor_name}
+                      </SelectItem>
                     ))}
                   </SelectContent>
                 </Select>

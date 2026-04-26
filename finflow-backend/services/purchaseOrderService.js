@@ -303,8 +303,10 @@ class PurchaseOrderService {
       });
     }
 
+    const vendorKey = header.counterparty_id || header.vendor_id || null;
     return {
       ...header,
+      vendor_id: vendorKey != null ? String(vendorKey) : header.vendor_id,
       base_status: header.status,
       status: this.deriveDisplayStatus(header.status, lines),
       lines,

@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue, SELECT_VALUE_ALL } from "@/components/ui/select";
 import { Input } from "@/components/ui/input";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -119,6 +119,7 @@ export function GoodsReceiptCreateFlow({ config, vendorOptions, itemOptions, pur
         item_id: l.item_id,
         description: l.description,
         quantity: qty,
+        received_quantity: qty,
         unit_cost: cost,
         // Backend supports this reference.
         ...( { purchase_order_line_id: l.id, ordered_quantity_snapshot: l.ordered_quantity } as any ),
@@ -213,9 +214,9 @@ export function GoodsReceiptCreateFlow({ config, vendorOptions, itemOptions, pur
             <div className="grid gap-2">
               <div className="text-sm font-medium">Vendor (optional filter)</div>
               <Select
-                value={vendorId}
+                value={vendorId || SELECT_VALUE_ALL}
                 onValueChange={(v) => {
-                  setVendorId(v);
+                  setVendorId(v === SELECT_VALUE_ALL ? "" : v);
                   setPoId("");
                 }}
               >
@@ -223,12 +224,14 @@ export function GoodsReceiptCreateFlow({ config, vendorOptions, itemOptions, pur
                   <SelectValue placeholder="Filter by vendor" />
                 </SelectTrigger>
                 <SelectContent className="bg-popover border border-border">
-                  <SelectItem value="">All vendors</SelectItem>
-                  {vendorOptions.map((opt) => (
-                    <SelectItem key={opt.value} value={opt.value}>
-                      {opt.label}
-                    </SelectItem>
-                  ))}
+                  <SelectItem value={SELECT_VALUE_ALL}>All vendors</SelectItem>
+                  {vendorOptions
+                    .filter((opt) => opt.value !== "")
+                    .map((opt) => (
+                      <SelectItem key={opt.value} value={opt.value}>
+                        {opt.label}
+                      </SelectItem>
+                    ))}
                 </SelectContent>
               </Select>
             </div>

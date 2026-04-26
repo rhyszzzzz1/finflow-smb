@@ -1,5 +1,6 @@
-import { useState, useEffect } from "react";
-import { accountingInvoiceApi, accountingReportsApi, goodsReceiptApi, purchaseOrderApi, salesOrderApi, salesQuoteApi } from "@/services/api";
+import { useMemo } from "react";
+import { useQuery } from "@tanstack/react-query";
+import { accountingInvoiceApi, dashboardStatsApi, goodsReceiptApi, purchaseOrderApi, salesOrderApi, salesQuoteApi } from "@/services/api";
 
 export interface DashboardStats {
   totalSales: number;
@@ -39,97 +40,104 @@ const toNumber = (value: unknown) => {
 };
 
 export const useDashboardStats = () => {
-  const [stats, setStats] = useState<DashboardStats>(defaultStats);
-  const [isLoading, setIsLoading] = useState(true);
+  const coreQuery = useQuery({
+    queryKey: ["dashboard", "coreStats"],
+    queryFn: async () => {
+      const raw = await dashboardStatsApi.getStats();
+      const monthlySales = Array.isArray(raw?.monthlySales) ? raw.monthlySales : [];
+      return {
+        totalSales: toNumber(raw?.totalSales),
+        pendingReceivables: toNumber(raw?.pendingReceivables),
+        pendingReceivablesCount: toNumber(raw?.pendingReceivablesCount),
+        outstandingPayables: toNumber(raw?.outstandingPayables),
+        inventoryValue: toNumber(raw?.inventoryValue),
+        inventoryCount: toNumber(raw?.inventoryCount),
+        monthlySales: monthlySales.map((r: any) => ({ month: String(r.month || ""), sales: toNumber(r.sales) })),
+      };
+    },
+    staleTime: 5 * 60 * 1000,
+    gcTime: 30 * 60 * 1000,
+    refetchInterval: 5 * 60 * 1000,
+    refetchOnWindowFocus: false,
+    retry: 1,
+  });
 
-  const fetchStats = async () => {
-    try {
-      const year = new Date().getFullYear();
-      const startDate = `${year}-01-01`;
-      const endDate = `${year}-12-31`;
-      const asOfDate = new Date().toISOString().slice(0, 10);
+  const workflowQuery = useQuery({
+    queryKey: ["dashboard", "workflowCounts"],
+    queryFn: async () => {
+      const [invoicesResult, salesQuotesResult, salesOrdersResult, purchaseOrdersResult, goodsReceiptsResult] =
+        await Promise.allSettled([
+          accountingInvoiceApi.list(),
+          salesQuoteApi.list(),
+          salesOrderApi.list(),
+          purchaseOrderApi.list(),
+          goodsReceiptApi.list(),
+        ]);
 
-      const [
-        profitLossResult,
-        arAgingResult,
-        apAgingResult,
-        stockSummaryResult,
-        invoicesResult,
-        salesQuotesResult,
-        salesOrdersResult,
-        purchaseOrdersResult,
-        goodsReceiptsResult,
-        grniResult,
-      ] = await Promise.allSettled([
-        accountingReportsApi.getProfitLoss({ startDate, endDate }),
-        accountingReportsApi.getARAging({ asOfDate }),
-        accountingReportsApi.getAPAging({ asOfDate }),
-        accountingReportsApi.getStockSummary({ asOfDate }),
-        accountingInvoiceApi.list(),
-        salesQuoteApi.list(),
-        salesOrderApi.list(),
-        purchaseOrderApi.list(),
-        goodsReceiptApi.list(),
-        accountingReportsApi.getGRNIControlReconciliation({ asOfDate }),
-      ]);
+      const invoices = invoicesResult.status === "fulfilled" && Array.isArray(invoicesResult.value) ? invoicesResult.value : [];
+      const salesQuotes = salesQuotesResult.status === "fulfilled" && Array.isArray(salesQuotesResult.value) ? salesQuotesResult.value : [];
+      const salesOrders = salesOrdersResult.status === "fulfilled" && Array.isArray(salesOrdersResult.value) ? salesOrdersResult.value : [];
+      const purchaseOrders = purchaseOrdersResult.status === "fulfilled" && Array.isArray(purchaseOrdersResult.value) ? purchaseOrdersResult.value : [];
+      const goodsReceipts = goodsReceiptsResult.status === "fulfilled" && Array.isArray(goodsReceiptsResult.value) ? goodsReceiptsResult.value : [];
 
-      const profitLoss = profitLossResult.status === "fulfilled" ? profitLossResult.value : null;
-      const arAging = arAgingResult.status === "fulfilled" ? arAgingResult.value : null;
-      const apAging = apAgingResult.status === "fulfilled" ? apAgingResult.value : null;
-      const stockSummary = stockSummaryResult.status === "fulfilled" ? stockSummaryResult.value : null;
-      const invoices = invoicesResult.status === "fulfilled" ? invoicesResult.value : [];
-      const salesQuotes = salesQuotesResult.status === "fulfilled" ? salesQuotesResult.value : [];
-      const salesOrders = salesOrdersResult.status === "fulfilled" ? salesOrdersResult.value : [];
-      const purchaseOrders = purchaseOrdersResult.status === "fulfilled" ? purchaseOrdersResult.value : [];
-      const goodsReceipts = goodsReceiptsResult.status === "fulfilled" ? goodsReceiptsResult.value : [];
-      const grni = grniResult.status === "fulfilled" ? grniResult.value : null;
+      return {
+        draftSalesQuotes: salesQuotes.filter((q: any) => String(q.status || "").toLowerCase() === "draft").length,
+        openSalesOrders: salesOrders.filter((o: any) => !["void", "converted"].includes(String(o.status || "").toLowerCase())).length,
+        invoicesAwaitingPosting: invoices.filter((i: any) =>
+          ["draft", "approved", "pending_approval", "rejected"].includes(String(i.base_status || i.status || "").toLowerCase())
+        ).length,
+        openPurchaseOrders: purchaseOrders.filter((o: any) => !["void", "received", "closed"].includes(String(o.status || "").toLowerCase())).length,
+        // Best-available approximation: backend dashboard endpoint doesn't include GRNI open line count yet.
+        unbilledGoodsReceipts: goodsReceipts.filter((r: any) => String(r.status || "").toLowerCase() === "posted").length,
+        // Best-available placeholder: backend dashboard endpoint doesn't include GRNI exposure yet.
+        grniExposure: 0,
+      };
+    },
+    staleTime: 60 * 1000,
+    gcTime: 10 * 60 * 1000,
+    refetchInterval: 2 * 60 * 1000,
+    refetchOnWindowFocus: false,
+    retry: 1,
+  });
 
-      const monthlySalesMap = new Map<string, number>();
-      const monthNames = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-      const invoiceRows = Array.isArray(invoices) ? invoices : [];
-      invoiceRows.forEach((invoice: any) => {
-        const status = String(invoice.status || "").toLowerCase();
-        if (["draft", "void"].includes(status)) return;
-        const invoiceDate = invoice.invoice_date ? new Date(invoice.invoice_date) : null;
-        if (!invoiceDate || Number.isNaN(invoiceDate.getTime()) || invoiceDate.getFullYear() !== year) return;
-        const month = monthNames[invoiceDate.getMonth()];
-        monthlySalesMap.set(month, toNumber(monthlySalesMap.get(month)) + toNumber(invoice.total_amount));
-      });
+  const stats: DashboardStats = useMemo(() => {
+    const core = coreQuery.data;
+    const wf = workflowQuery.data;
+    return {
+      ...defaultStats,
+      totalSales: toNumber(core?.totalSales),
+      pendingReceivables: toNumber(core?.pendingReceivables),
+      pendingReceivablesCount: toNumber(core?.pendingReceivablesCount),
+      outstandingPayables: toNumber(core?.outstandingPayables),
+      inventoryValue: toNumber(core?.inventoryValue),
+      inventoryCount: toNumber(core?.inventoryCount),
+      monthlySales: Array.isArray(core?.monthlySales) ? core!.monthlySales : [],
+      draftSalesQuotes: toNumber(wf?.draftSalesQuotes),
+      openSalesOrders: toNumber(wf?.openSalesOrders),
+      invoicesAwaitingPosting: toNumber(wf?.invoicesAwaitingPosting),
+      openPurchaseOrders: toNumber(wf?.openPurchaseOrders),
+      unbilledGoodsReceipts: toNumber(wf?.unbilledGoodsReceipts),
+      grniExposure: toNumber(wf?.grniExposure),
+    };
+  }, [coreQuery.data, workflowQuery.data]);
 
-      setStats({
-        totalSales: toNumber(profitLoss?.totals?.total_income),
-        pendingReceivables: toNumber(arAging?.buckets?.total),
-        pendingReceivablesCount: Array.isArray(arAging?.lines) ? arAging.lines.length : 0,
-        outstandingPayables: toNumber(apAging?.buckets?.total),
-        inventoryValue: toNumber(stockSummary?.totals?.total_on_hand_value),
-        inventoryCount: toNumber(stockSummary?.totals?.total_items),
-        draftSalesQuotes: (Array.isArray(salesQuotes) ? salesQuotes : []).filter((quote: any) => String(quote.status || "").toLowerCase() === "draft").length,
-        openSalesOrders: (Array.isArray(salesOrders) ? salesOrders : []).filter((order: any) => !["void", "converted"].includes(String(order.status || "").toLowerCase())).length,
-        invoicesAwaitingPosting: invoiceRows.filter((invoice: any) => ["draft", "approved", "pending_approval", "rejected"].includes(String(invoice.base_status || invoice.status || "").toLowerCase())).length,
-        openPurchaseOrders: (Array.isArray(purchaseOrders) ? purchaseOrders : []).filter((order: any) => !["void", "received", "closed"].includes(String(order.status || "").toLowerCase())).length,
-        unbilledGoodsReceipts: (grni?.details?.open_receipt_lines) || (Array.isArray(goodsReceipts) ? goodsReceipts.filter((receipt: any) => String(receipt.status || "").toLowerCase() === "posted").length : 0),
-        grniExposure: toNumber(grni?.subledger_balance),
-        monthlySales: monthNames
-          .filter((month) => monthlySalesMap.has(month))
-          .map((month) => ({ month, sales: toNumber(monthlySalesMap.get(month)) })),
-      });
-    } catch (error) {
-      console.error("Failed to fetch dashboard stats:", error);
-      setStats(defaultStats);
-    } finally {
-      setIsLoading(false);
-    }
+  const lastUpdatedAt = coreQuery.dataUpdatedAt || workflowQuery.dataUpdatedAt || 0;
+  const isRefreshing = Boolean(coreQuery.isFetching || workflowQuery.isFetching);
+  const isLoading = Boolean((coreQuery.isLoading && !coreQuery.data) || (workflowQuery.isLoading && !workflowQuery.data));
+
+  const errors = {
+    core: coreQuery.error ? (coreQuery.error as any) : null,
+    workflow: workflowQuery.error ? (workflowQuery.error as any) : null,
   };
-
-  useEffect(() => {
-    fetchStats();
-    const interval = setInterval(fetchStats, 10000);
-    return () => clearInterval(interval);
-  }, []);
 
   return {
     stats,
     isLoading,
-    refetch: fetchStats,
+    isRefreshing,
+    lastUpdatedAt,
+    errors,
+    refetch: async () => {
+      await Promise.all([coreQuery.refetch(), workflowQuery.refetch()]);
+    },
   };
 };

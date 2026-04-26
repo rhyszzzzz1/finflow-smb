@@ -303,6 +303,23 @@ class InventoryService {
     return this.inventoryRepository.listItems(companyId);
   }
 
+  /**
+   * Items linked to a vendor for purchase-order line pickers. vendorRef matches PO header (legacy vendors.id or counterparty_id or linked_profile_id).
+   * @returns {{ filterActive: boolean, items: object[] }}
+   */
+  async listItemsForPurchaseVendor(actorUserId, vendorRef) {
+    const companyId = await this.resolveCompanyId(actorUserId);
+    const vendor = await this.inventoryRepository.findVendorByUserAndRef(actorUserId, vendorRef);
+    if (!vendor) {
+      return { filterActive: false, items: [] };
+    }
+    const items = await this.inventoryRepository.listItemsForVendorPurchase(companyId, vendor.id);
+    if (!items.length) {
+      return { filterActive: false, items: [] };
+    }
+    return { filterActive: true, items };
+  }
+
   async createItem(actorUserId, payload) {
     // Creating an item must not imply stock on hand. Opening balances and later
     // changes belong in explicit stock movement flows.

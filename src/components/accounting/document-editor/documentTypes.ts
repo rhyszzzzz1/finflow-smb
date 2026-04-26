@@ -70,6 +70,12 @@ export type DocumentTypeConfig = {
   supportsSources: boolean;
   supportsUnitPrice: boolean;
   supportsUnitCost: boolean;
+  /** Column title for the item/SKU selector (default: "Item"). */
+  itemColumnLabel?: string;
+  /** Muted sub-label under the item column header (e.g. procurement vs internal master). */
+  itemColumnHint?: string;
+  /** Placeholder on the item Select when editing. */
+  itemSelectPlaceholder?: string;
 };
 
 export const defaultLine = (config: DocumentTypeConfig): EditableLine => ({

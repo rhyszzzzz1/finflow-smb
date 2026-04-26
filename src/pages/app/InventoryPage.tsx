@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { Link2, Package2, RefreshCcw, Shuffle } from "lucide-react";
+import { ChevronDown, ChevronRight, Link2, Package2, RefreshCcw, Shuffle, ShieldAlert } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -26,17 +26,20 @@ export const InventoryPage = ({ initialTab = "items" }: Props) => {
     warehouses,
     stockBalances,
     isLoading,
+    isLegacyLoading,
     createItem,
     createWarehouse,
     createStockAdjustment,
     createStockTransfer,
     addItemVendorLink,
     markPreferredVendor,
+    fetchLegacyInventory,
   } = useInventory();
   const { vendorOptions } = useMasterData();
   const [selectedItemId, setSelectedItemId] = useState("");
   const [itemVendorLinks, setItemVendorLinks] = useState<any[]>([]);
   const [isLinksLoading, setIsLinksLoading] = useState(false);
+  const [showCompatibility, setShowCompatibility] = useState(false);
   const [itemForm, setItemForm] = useState({ name: "", sku: "", item_type: "inventory" });
   const [warehouseForm, setWarehouseForm] = useState({ name: "", code: "" });
   const [adjustmentForm, setAdjustmentForm] = useState({ item_id: "", warehouse_id: "", quantity_delta: "0", unit_cost: "0", notes: "" });
@@ -73,6 +76,12 @@ export const InventoryPage = ({ initialTab = "items" }: Props) => {
     loadLinks();
   }, [selectedItemId]);
 
+  useEffect(() => {
+    if (!showCompatibility) return;
+    if (inventory.length > 0) return;
+    fetchLegacyInventory();
+  }, [showCompatibility, inventory.length, fetchLegacyInventory]);
+
   if (isLoading) {
     return <LoadingState title="Inventory" message="Loading item master, warehouses, and stock balances..." />;
   }
@@ -88,17 +97,21 @@ export const InventoryPage = ({ initialTab = "items" }: Props) => {
 
       <Tabs defaultValue={initialTab} className="space-y-6">
         <TabsList className="flex flex-wrap h-auto">
-          <TabsTrigger value="items">Items</TabsTrigger>
+          <TabsTrigger value="items">Item Master</TabsTrigger>
           <TabsTrigger value="warehouses">Warehouses</TabsTrigger>
           <TabsTrigger value="balances">Stock Balances</TabsTrigger>
           <TabsTrigger value="movements">Adjustments & Transfers</TabsTrigger>
           <TabsTrigger value="vendors">Item-Vendor Links</TabsTrigger>
-          <TabsTrigger value="compatibility">Compatibility Inventory</TabsTrigger>
         </TabsList>
 
         <TabsContent value="items" className="space-y-6">
           <Card>
-            <CardHeader><CardTitle>Create Internal Item Master</CardTitle></CardHeader>
+            <CardHeader className="pb-2">
+              <CardTitle>Create item (master data)</CardTitle>
+              <p className="text-sm text-muted-foreground">
+                Item creation does <span className="font-medium">not</span> create stock. Stock comes only from goods receipts, adjustments, and transfers.
+              </p>
+            </CardHeader>
             <CardContent className="grid gap-4 md:grid-cols-4">
               <div className="grid gap-2">
                 <Label>Name</Label>
@@ -245,7 +258,7 @@ export const InventoryPage = ({ initialTab = "items" }: Props) => {
                   <Select value={adjustmentForm.item_id} onValueChange={(value) => setAdjustmentForm((current) => ({ ...current, item_id: value }))}>
                     <SelectTrigger><SelectValue placeholder="Select item" /></SelectTrigger>
                     <SelectContent className="bg-popover border border-border">
-                      {itemOptions.map((option) => <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>)}
+                      {itemOptions.filter((option) => option.value !== "").map((option) => <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>)}
                     </SelectContent>
                   </Select>
                 </div>
@@ -254,7 +267,7 @@ export const InventoryPage = ({ initialTab = "items" }: Props) => {
                   <Select value={adjustmentForm.warehouse_id} onValueChange={(value) => setAdjustmentForm((current) => ({ ...current, warehouse_id: value }))}>
                     <SelectTrigger><SelectValue placeholder="Select warehouse" /></SelectTrigger>
                     <SelectContent className="bg-popover border border-border">
-                      {warehouseOptions.map((option) => <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>)}
+                      {warehouseOptions.filter((option) => option.value !== "").map((option) => <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>)}
                     </SelectContent>
                   </Select>
                 </div>
@@ -295,7 +308,7 @@ export const InventoryPage = ({ initialTab = "items" }: Props) => {
                   <Select value={transferForm.item_id} onValueChange={(value) => setTransferForm((current) => ({ ...current, item_id: value }))}>
                     <SelectTrigger><SelectValue placeholder="Select item" /></SelectTrigger>
                     <SelectContent className="bg-popover border border-border">
-                      {itemOptions.map((option) => <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>)}
+                      {itemOptions.filter((option) => option.value !== "").map((option) => <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>)}
                     </SelectContent>
                   </Select>
                 </div>
@@ -305,7 +318,7 @@ export const InventoryPage = ({ initialTab = "items" }: Props) => {
                     <Select value={transferForm.from_warehouse_id} onValueChange={(value) => setTransferForm((current) => ({ ...current, from_warehouse_id: value }))}>
                       <SelectTrigger><SelectValue placeholder="From" /></SelectTrigger>
                       <SelectContent className="bg-popover border border-border">
-                        {warehouseOptions.map((option) => <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>)}
+                        {warehouseOptions.filter((option) => option.value !== "").map((option) => <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>)}
                       </SelectContent>
                     </Select>
                   </div>
@@ -314,7 +327,7 @@ export const InventoryPage = ({ initialTab = "items" }: Props) => {
                     <Select value={transferForm.to_warehouse_id} onValueChange={(value) => setTransferForm((current) => ({ ...current, to_warehouse_id: value }))}>
                       <SelectTrigger><SelectValue placeholder="To" /></SelectTrigger>
                       <SelectContent className="bg-popover border border-border">
-                        {warehouseOptions.map((option) => <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>)}
+                        {warehouseOptions.filter((option) => option.value !== "").map((option) => <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>)}
                       </SelectContent>
                     </Select>
                   </div>
@@ -354,7 +367,7 @@ export const InventoryPage = ({ initialTab = "items" }: Props) => {
                   <Select value={selectedItemId} onValueChange={setSelectedItemId}>
                     <SelectTrigger><SelectValue placeholder="Select item" /></SelectTrigger>
                     <SelectContent className="bg-popover border border-border">
-                      {itemOptions.map((option) => <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>)}
+                      {itemOptions.filter((option) => option.value !== "").map((option) => <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>)}
                     </SelectContent>
                   </Select>
                 </div>
@@ -369,7 +382,7 @@ export const InventoryPage = ({ initialTab = "items" }: Props) => {
                   <Select value={vendorLinkForm.vendor_id} onValueChange={(value) => setVendorLinkForm((current) => ({ ...current, vendor_id: value }))}>
                     <SelectTrigger><SelectValue placeholder="Select vendor" /></SelectTrigger>
                     <SelectContent className="bg-popover border border-border">
-                      {vendorOptions.map((option) => <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>)}
+                      {vendorOptions.filter((option) => option.value !== "").map((option) => <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>)}
                     </SelectContent>
                   </Select>
                 </div>
@@ -443,40 +456,81 @@ export const InventoryPage = ({ initialTab = "items" }: Props) => {
             </CardContent>
           </Card>
         </TabsContent>
+      </Tabs>
 
-        <TabsContent value="compatibility">
-          <Card>
-            <CardHeader><CardTitle className="flex items-center gap-2"><Package2 className="w-4 h-4" />Compatibility Inventory View</CardTitle></CardHeader>
-            <CardContent>
-              <p className="text-sm text-muted-foreground mb-4">
-                Transitional view only. This list comes from the legacy compatibility inventory surface and should not be treated as the authoritative stock source.
-              </p>
+      <Card className="border-dashed border-border bg-muted/20">
+        <CardHeader className="pb-2">
+          <CardTitle className="text-base flex items-center justify-between gap-3">
+            <span className="flex items-center gap-2">
+              <ShieldAlert className="w-4 h-4 text-muted-foreground" />
+              Legacy / compatibility inventory (transitional)
+            </span>
+            <Button variant="ghost" className="gap-2" onClick={() => setShowCompatibility((v) => !v)}>
+              {showCompatibility ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
+              {showCompatibility ? "Hide" : "Show"}
+            </Button>
+          </CardTitle>
+          <p className="text-sm text-muted-foreground">
+            This view supports older workflows that think in “products with stock quantity.” It is not the authoritative stock source.
+          </p>
+        </CardHeader>
+        {showCompatibility ? (
+          <CardContent className="space-y-4">
+            <div className="flex items-center justify-between gap-3 flex-wrap">
+              <div className="text-sm text-muted-foreground">
+                Compatibility inventory rows: <span className="font-semibold text-foreground">{inventory.length}</span>
+              </div>
+              <Button
+                variant="outline"
+                className="gap-2"
+                onClick={() => fetchLegacyInventory()}
+                disabled={isLegacyLoading}
+              >
+                <Package2 className="h-4 w-4" />
+                Refresh compatibility list
+              </Button>
+            </div>
+
+            <div className="rounded-md border border-border overflow-hidden">
               <Table>
                 <TableHeader>
-                  <TableRow>
+                  <TableRow className="bg-muted/50">
                     <TableHead>Product</TableHead>
                     <TableHead>SKU</TableHead>
                     <TableHead>Vendor</TableHead>
-                    <TableHead className="text-right">Compatibility Qty</TableHead>
+                    <TableHead className="text-right">Compatibility qty</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
-                  {inventory.length === 0 ? (
-                    <TableRow><TableCell colSpan={4}><EmptyState title="No compatibility inventory rows" description="The modern stock ledger is active even when this list is empty." /></TableCell></TableRow>
-                  ) : inventory.map((item) => (
-                    <TableRow key={item.id}>
-                      <TableCell className="font-medium">{item.product_name}</TableCell>
-                      <TableCell>{item.sku}</TableCell>
-                      <TableCell>{item.vendor_name || "-"}</TableCell>
-                      <TableCell className="text-right">{item.stock_quantity}</TableCell>
+                  {isLegacyLoading ? (
+                    <TableRow>
+                      <TableCell colSpan={4}>Loading compatibility inventory...</TableCell>
                     </TableRow>
-                  ))}
+                  ) : inventory.length === 0 ? (
+                    <TableRow>
+                      <TableCell colSpan={4}>
+                        <EmptyState
+                          title="No compatibility inventory rows"
+                          description="Your authoritative stock balances can still be active even when this list is empty."
+                        />
+                      </TableCell>
+                    </TableRow>
+                  ) : (
+                    inventory.map((item) => (
+                      <TableRow key={item.id}>
+                        <TableCell className="font-medium">{item.product_name}</TableCell>
+                        <TableCell>{item.sku}</TableCell>
+                        <TableCell>{item.vendor_name || "-"}</TableCell>
+                        <TableCell className="text-right">{item.stock_quantity}</TableCell>
+                      </TableRow>
+                    ))
+                  )}
                 </TableBody>
               </Table>
-            </CardContent>
-          </Card>
-        </TabsContent>
-      </Tabs>
+            </div>
+          </CardContent>
+        ) : null}
+      </Card>
     </div>
   );
 };

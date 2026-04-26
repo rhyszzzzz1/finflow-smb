@@ -249,6 +249,51 @@ class InventoryRepository {
     );
   }
 
+  /**
+   * Resolve a vendor row for the buyer (vendors.user_id) using legacy id, counterparty id, or linked supplier profile id.
+   */
+  async findVendorByUserAndRef(userId, ref) {
+    if (!ref) return null;
+    const r = String(ref).trim();
+    if (!r) return null;
+    return this.queryOne(
+      `SELECT id, vendor_name, linked_profile_id, counterparty_id
+         FROM vendors
+        WHERE user_id = ?
+          AND (id = ? OR counterparty_id = ? OR linked_profile_id = ?)
+        LIMIT 1`,
+      [userId, r, r, r]
+    );
+  }
+
+  /**
+   * Internal items linked to a legacy vendors.id row (item_vendor_links.vendor_id).
+   */
+  async listItemsForVendorPurchase(companyId, legacyVendorId) {
+    if (!legacyVendorId) return [];
+    return this.queryAll(
+      `SELECT DISTINCT
+          it.id,
+          it.name,
+          it.sku,
+          it.description,
+          it.default_purchase_price,
+          it.default_selling_price,
+          ivl.vendor_sku,
+          ivl.preferred_flag,
+          ivl.last_purchase_price AS link_last_purchase_price
+         FROM item_vendor_links ivl
+         INNER JOIN items it
+           ON it.id = ivl.item_id
+          AND it.company_id = ivl.company_id
+          AND it.is_active = 1
+        WHERE ivl.company_id = ?
+          AND ivl.vendor_id = ?
+        ORDER BY ivl.preferred_flag DESC, it.name ASC`,
+      [companyId, legacyVendorId]
+    );
+  }
+
   async findVendorProduct(ownerUserId, vendorProductId) {
     return this.queryOne(
       `SELECT *

@@ -15,8 +15,8 @@ import { useInvoices } from "@/hooks/useInvoices";
 import { usePurchaseBills } from "@/hooks/usePurchaseBills";
 import { inventoryApi, clientsApi } from "@/services/api";
 
-type ClientOption = { id: string; client_name: string };
-type VendorOption = { id: string; vendor_name: string };
+type ClientOption = { id: string; counterparty_id?: string | null; client_name: string };
+type VendorOption = { id: string; counterparty_id?: string | null; vendor_name: string };
 type ItemOption = { id: string; name: string; sku?: string | null };
 
 export const BillingView = () => {
@@ -242,9 +242,12 @@ export const BillingView = () => {
                         <SelectValue placeholder="Select a client" />
                       </SelectTrigger>
                       <SelectContent className="bg-popover border border-border">
-                        {clientList.map((client) => (
-                          <SelectItem key={client.id} value={client.id}>{client.client_name}</SelectItem>
-                        ))}
+                        {clientList.map((client) => {
+                          const value = String(client.counterparty_id || client.id);
+                          return (
+                            <SelectItem key={client.id} value={value}>{client.client_name}</SelectItem>
+                          );
+                        })}
                       </SelectContent>
                     </Select>
                   </div>
@@ -318,9 +321,12 @@ export const BillingView = () => {
                         <SelectValue placeholder="Select a linked vendor" />
                       </SelectTrigger>
                       <SelectContent className="bg-popover border border-border">
-                        {vendorList.map((vendor) => (
-                          <SelectItem key={vendor.id} value={vendor.id}>{vendor.vendor_name}</SelectItem>
-                        ))}
+                        {vendorList.map((vendor) => {
+                          const value = String(vendor.counterparty_id || vendor.id);
+                          return (
+                            <SelectItem key={vendor.id} value={value}>{vendor.vendor_name}</SelectItem>
+                          );
+                        })}
                       </SelectContent>
                     </Select>
                   </div>

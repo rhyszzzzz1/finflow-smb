@@ -209,7 +209,13 @@ class SalesQuoteService {
 
   async hydrateQuote(conn, header) {
     const lines = await this.queryAll(conn, `SELECT * FROM sales_quote_lines WHERE sales_quote_id = ? ORDER BY line_no ASC`, [header.id]);
-    return { ...header, lines };
+    const customerKey = header.counterparty_id || header.customer_id || null;
+    return {
+      ...header,
+      // Align with client list options (counterparty_id || legacy clients.id) so the Select shows the name.
+      customer_id: customerKey != null ? String(customerKey) : header.customer_id,
+      lines,
+    };
   }
 
   async createDraft(actorUserId, payload, requestMeta = {}) {

@@ -52,13 +52,20 @@ const apiRequest = async (endpoint: string, options: RequestInit = {}) => {
 
     const data = await response.json().catch(() => ({}));
     if (!response.ok) {
-      throw new Error(data.message || "An error occurred");
+      if (response.status === 401 || response.status === 403) {
+        throw new Error("Your session has expired or is not authorized. Please log in again and retry the action.");
+      }
+      throw new Error(data.message || `Request failed (${response.status})`);
     }
 
     return data;
   } catch (error: any) {
     if (error?.name === "AbortError") {
       throw new Error("Request timed out while loading data");
+    }
+    // Fetch throws TypeError on network/DNS/CORS failures.
+    if (error instanceof TypeError) {
+      throw new Error("Network error while contacting the server. Check your connection and retry.");
     }
     throw error;
   } finally {
@@ -177,6 +184,18 @@ export const businessRelationshipApi = {
 // AUTHORITATIVE: settlement source of truth
 export const paymentApi = {
   apply: async (payment: any) => post("/payments/apply", payment),
+  /** Khalti ePayment redirect flow for vendor (payable) settlement — returns payment_url. */
+  khaltiVendorInitiate: async (body: {
+    amount: number;
+    date: string;
+    vendor_id: string;
+    allocations: { target_type: string; target_id: string; allocated_amount: number }[];
+    reference?: string | null;
+    notes?: string | null;
+    document_no?: string | null;
+  }) => post("/payments/khalti/vendor/initiate", body),
+  khaltiVendorVerify: async (body: { pidx: string; status?: string; transaction_id?: string | null }) =>
+    post("/payments/khalti/vendor/verify", body),
   listBankAccounts: async () => apiRequest("/bank-accounts"),
   getInvoiceOutstanding: async (id: string) => apiRequest(`/outstanding/invoices/${id}`),
   getPurchaseOutstanding: async (id: string) => apiRequest(`/outstanding/purchases/${id}`),
@@ -211,6 +230,9 @@ export const inventoryApi = {
   createStockAdjustment: async (payload: any) => post("/stock/adjustment", payload),
   createStockTransfer: async (payload: any) => post("/stock/transfer", payload),
   getItems: async () => apiRequest("/items"),
+  /** Purchase order line picker: items linked to vendor in Inventory (vendor_ref = PO vendor field). */
+  getItemsForPurchase: async (vendorRef: string) =>
+    apiRequest(`/items/for-purchase${buildQuery({ vendor_ref: vendorRef })}`),
   createItem: async (payload: any) => post("/items", payload),
   getWarehouses: async () => apiRequest("/warehouses"),
   createWarehouse: async (payload: any) => post("/warehouses", payload),
@@ -238,6 +260,11 @@ export const settingsApi = {
 // DEPRECATED: use accountingReportsApi + workflow hooks instead
 export const dashboardApi = {
   getStats: async () => deprecatedWrite("dashboardApi.getStats", "useDashboardStats with workflow-aware accounting reports"),
+};
+
+// AUTHORITATIVE: consolidated dashboard stats (cloud-friendly)
+export const dashboardStatsApi = {
+  getStats: async () => apiRequest("/dashboard/stats"),
 };
 
 // Transitional relationship/contact compatibility layer

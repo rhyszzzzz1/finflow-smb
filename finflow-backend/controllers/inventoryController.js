@@ -68,6 +68,16 @@ class InventoryController {
     return res.json(rows);
   };
 
+  /** Query: vendor_ref — same id as purchase order vendor field (counterparty or legacy vendor row). */
+  listItemsForPurchase = async (req, res) => {
+    const vendorRef = req.query.vendor_ref != null ? String(req.query.vendor_ref).trim() : "";
+    if (!vendorRef) {
+      return res.json({ filterActive: false, items: [] });
+    }
+    const payload = await this.inventoryService.listItemsForPurchaseVendor(req.user.id, vendorRef);
+    return res.json(payload);
+  };
+
   createItem = async (req, res) => {
     const row = await this.inventoryService.createItem(req.user.id, req.body);
     return res.status(201).json(row);

@@ -1,8 +1,9 @@
 "use strict";
 
 class PaymentController {
-  constructor(paymentService) {
+  constructor(paymentService, khaltiVendorPaymentService = null) {
     this.paymentService = paymentService;
+    this.khaltiVendorPaymentService = khaltiVendorPaymentService;
   }
 
   applyPayment = async (req, res) => {
@@ -63,6 +64,40 @@ class PaymentController {
       message: "This endpoint is deprecated. Use accounting APIs instead.",
       detail: "Receivables/payables are derived from invoices/purchases and payment allocations. Direct edits are disabled.",
     });
+  };
+
+  khaltiInitiateVendor = async (req, res) => {
+    if (!this.khaltiVendorPaymentService) {
+      return res.status(503).json({ message: "Khalti vendor payments are not enabled on this server" });
+    }
+    try {
+      const result = await this.khaltiVendorPaymentService.initiateVendorPayment(
+        req.user.id,
+        req.body,
+        req.requestMeta || {}
+      );
+      return res.json(result);
+    } catch (err) {
+      const code = err.statusCode || 500;
+      return res.status(code).json({ message: err.message || "Khalti initiate failed" });
+    }
+  };
+
+  khaltiVerifyVendor = async (req, res) => {
+    if (!this.khaltiVendorPaymentService) {
+      return res.status(503).json({ message: "Khalti vendor payments are not enabled on this server" });
+    }
+    try {
+      const result = await this.khaltiVendorPaymentService.verifyAndSettle(
+        req.user.id,
+        req.body,
+        req.requestMeta || {}
+      );
+      return res.json(result);
+    } catch (err) {
+      const code = err.statusCode || 500;
+      return res.status(code).json({ message: err.message || "Khalti verify failed" });
+    }
   };
 }
 

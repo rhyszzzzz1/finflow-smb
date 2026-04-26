@@ -674,13 +674,13 @@ class AccountingReportsService {
        FROM sales_invoice_headers si
        LEFT JOIN payment_allocations pa ON pa.sales_invoice_id = si.id OR pa.invoice_id = si.id
        LEFT JOIN payments p ON p.id = pa.payment_id
-       WHERE si.company_id = ?
+       WHERE (si.company_id = ? OR (si.company_id IS NULL AND si.user_id = ?))
          AND si.posted_journal_entry_id IS NOT NULL
          AND si.status != 'void'
          AND si.invoice_date <= ?
        GROUP BY si.id, si.invoice_no, COALESCE(si.counterparty_id, si.customer_id), si.customer_id, si.customer_name, si.invoice_date, si.due_date, si.total_amount
        ORDER BY si.due_date ASC, si.invoice_date ASC`,
-      [as_of_date, companyId, as_of_date]
+      [as_of_date, companyId, scopeId, as_of_date]
     );
 
     const lines = rows
@@ -744,13 +744,13 @@ class AccountingReportsService {
        FROM purchase_bill_headers pb
        LEFT JOIN payment_allocations pa ON pa.purchase_bill_id = pb.id OR pa.purchase_id = pb.id
        LEFT JOIN payments p ON p.id = pa.payment_id
-       WHERE pb.company_id = ?
+       WHERE (pb.company_id = ? OR (pb.company_id IS NULL AND pb.user_id = ?))
          AND pb.posted_journal_entry_id IS NOT NULL
          AND pb.status != 'void'
          AND pb.bill_date <= ?
        GROUP BY pb.id, pb.bill_no, COALESCE(pb.counterparty_id, pb.vendor_id), pb.vendor_id, pb.vendor_name, pb.bill_date, pb.due_date, pb.total_amount
        ORDER BY pb.due_date ASC, pb.bill_date ASC`,
-      [as_of_date, companyId, as_of_date]
+      [as_of_date, companyId, scopeId, as_of_date]
     );
 
     const lines = rows
@@ -798,12 +798,12 @@ class AccountingReportsService {
           total_amount AS amount,
           notes
        FROM sales_invoice_headers
-       WHERE company_id = ?
+       WHERE (company_id = ? OR (company_id IS NULL AND user_id = ?))
          AND COALESCE(counterparty_id, customer_id) = ?
          AND posted_journal_entry_id IS NOT NULL
          AND status != 'void'
          AND invoice_date BETWEEN ? AND ?`,
-      [companyId, customerId, start, end]
+      [companyId, scopeId, customerId, start, end]
     );
 
     const payments = await this.q(
@@ -895,12 +895,12 @@ class AccountingReportsService {
           total_amount AS amount,
           notes
        FROM purchase_bill_headers
-       WHERE company_id = ?
+       WHERE (company_id = ? OR (company_id IS NULL AND user_id = ?))
          AND COALESCE(counterparty_id, vendor_id) = ?
          AND posted_journal_entry_id IS NOT NULL
          AND status != 'void'
          AND bill_date BETWEEN ? AND ?`,
-      [companyId, vendorId, start, end]
+      [companyId, scopeId, vendorId, start, end]
     );
 
     const payments = await this.q(

@@ -258,7 +258,8 @@ class GoodsReceiptService {
     const receivedQuantity = this.qty(line.received_quantity);
     const unitCost = this.qty(line.unit_cost !== undefined ? line.unit_cost : purchaseOrderLine?.unit_cost);
 
-    if (!itemId) throw new Error("Goods receipt lines require item_id or a referenced purchase order line with item_id");
+    // item_id may be null (e.g. description-only PO lines). Posting uses applyPurchaseReceipt, which
+    // find-or-creates an item by description when itemId is absent.
     if (!description) throw new Error("Each goods receipt line requires description");
     if (receivedQuantity <= 0) throw new Error("received_quantity must be greater than 0");
     if (unitCost < 0) throw new Error("unit_cost must be 0 or greater");
@@ -362,7 +363,8 @@ class GoodsReceiptService {
   }
 
   buildInventoryReceiptJournalLines(header, lines) {
-    const inventoryLines = lines.filter((line) => line.item_id);
+    // Include description-only lines (item_id null until post resolves them); value is line_total.
+    const inventoryLines = lines.filter((line) => this.money(Number(line.line_total || 0)) > 0);
     const inventoryAmount = this.money(
       inventoryLines.reduce((sum, line) => sum + Number(line.line_total || 0), 0)
     );
@@ -605,6 +607,10 @@ class GoodsReceiptService {
           conn,
         });
         inventoryResults.push({ ...result, line_no: line.line_no });
+        if (result.applied && result.item_id && !line.item_id) {
+          await conn.execute(`UPDATE goods_receipt_lines SET item_id = ? WHERE id = ?`, [result.item_id, line.id]);
+          line.item_id = result.item_id;
+        }
       }
 
       const postedJournal = await this.journalService.postJournalEntry({

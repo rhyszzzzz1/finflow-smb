@@ -48,7 +48,18 @@ export const SalesOrdersPage = () => {
           visible: (item: any) => statusVisible(item.status, "draft"),
         },
         { label: "Convert to Invoice", onClick: (item: any) => convertToInvoice(item.id), visible: (item: any) => statusVisible(item.status, "accepted") },
-        { label: "Void", onClick: (item: any) => voidOrder(item.id), visible: (item: any) => !statusVisible(item.status, "void", "converted"), variant: "destructive" },
+        {
+          label: "Void Sales Order",
+          onClick: (item: any) => voidOrder(item.id),
+          visible: (item: any) => !statusVisible(item.status, "void", "converted"),
+          variant: "destructive",
+          confirm: {
+            title: "Void sales order",
+            confirmLabel: "Void order",
+            description: "Void only when you must cancel this commercial commitment. If already converted, void the resulting document instead.",
+            variant: "destructive",
+          },
+        },
       ]}
       stats={[
         { label: "Draft Orders", value: String(salesOrders.filter((order: any) => statusVisible(order.status, "draft")).length) },

@@ -1,6 +1,6 @@
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue, SELECT_VALUE_NONE } from "@/components/ui/select";
 import { TableCell, TableRow } from "@/components/ui/table";
 import { Badge } from "@/components/ui/badge";
 import { Trash2 } from "lucide-react";
@@ -94,17 +94,22 @@ export function DocumentLineRow({
         {readOnly ? (
           <div className="text-sm">{line.item_id ? (itemOptions.find((o) => o.value === line.item_id)?.label || line.item_id) : "-"}</div>
         ) : (
-          <Select value={line.item_id || ""} onValueChange={(value) => onChange({ item_id: value || null })}>
+          <Select
+            value={line.item_id || SELECT_VALUE_NONE}
+            onValueChange={(value) => onChange({ item_id: value === SELECT_VALUE_NONE ? null : value })}
+          >
             <SelectTrigger>
-              <SelectValue placeholder="Select item (optional)" />
+              <SelectValue placeholder={config.itemSelectPlaceholder ?? "Select item (optional)"} />
             </SelectTrigger>
             <SelectContent className="bg-popover border border-border">
-              <SelectItem value="">No item</SelectItem>
-              {itemOptions.map((opt) => (
-                <SelectItem key={opt.value} value={opt.value}>
-                  {opt.label}
-                </SelectItem>
-              ))}
+              <SelectItem value={SELECT_VALUE_NONE}>{config.type === "purchase_order" ? "None — description only" : "No item"}</SelectItem>
+              {itemOptions
+                .filter((opt) => opt.value !== "")
+                .map((opt) => (
+                  <SelectItem key={opt.value} value={opt.value}>
+                    {opt.label}
+                  </SelectItem>
+                ))}
             </SelectContent>
           </Select>
         )}
@@ -120,20 +125,22 @@ export function DocumentLineRow({
             </div>
           ) : (
             <Select
-              value={line.expense_account_id || ""}
-              onValueChange={(value) => onChange({ expense_account_id: value || null })}
+              value={line.expense_account_id || SELECT_VALUE_NONE}
+              onValueChange={(value) => onChange({ expense_account_id: value === SELECT_VALUE_NONE ? null : value })}
               disabled={(line.line_kind || (line.expense_account_id ? "expense" : "inventory")) !== "expense"}
             >
               <SelectTrigger>
                 <SelectValue placeholder="Expense account (required for services)" />
               </SelectTrigger>
               <SelectContent className="bg-popover border border-border">
-                <SelectItem value="">None</SelectItem>
-                {expenseAccountOptions.map((opt) => (
-                  <SelectItem key={opt.value} value={opt.value}>
-                    {opt.label}
-                  </SelectItem>
-                ))}
+                <SelectItem value={SELECT_VALUE_NONE}>None</SelectItem>
+                {(expenseAccountOptions || [])
+                  .filter((opt) => opt.value !== "")
+                  .map((opt) => (
+                    <SelectItem key={opt.value} value={opt.value}>
+                      {opt.label}
+                    </SelectItem>
+                  ))}
               </SelectContent>
             </Select>
           )}

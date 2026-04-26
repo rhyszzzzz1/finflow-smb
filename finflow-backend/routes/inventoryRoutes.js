@@ -31,6 +31,7 @@ function createInventoryRoutes({ authenticate, inventoryController }) {
   router.post("/stock/transfer", authenticate, validateRequest({ customBodyValidator: validateStockTransferPayload }), asyncHandler(inventoryController.createStockTransfer));
 
   router.get("/items", authenticate, asyncHandler(inventoryController.listItems));
+  router.get("/items/for-purchase", authenticate, asyncHandler(inventoryController.listItemsForPurchase));
   router.post("/items", authenticate, validateRequest({ customBodyValidator: validateItemPayload }), asyncHandler(inventoryController.createItem));
   router.get("/items/:itemId/vendors", authenticate, asyncHandler(inventoryController.listItemVendorLinks));
   router.post("/items/:itemId/vendors", authenticate, validateRequest({ customBodyValidator: validateItemVendorLinkPayload }), asyncHandler(inventoryController.linkVendorToItem));

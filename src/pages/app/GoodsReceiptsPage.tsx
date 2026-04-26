@@ -43,8 +43,28 @@ export const GoodsReceiptsPage = () => {
         { header: "Billed Qty", align: "right", render: (item: any) => Number(item.billed_quantity || 0).toFixed(2) },
       ]}
       actions={[
-        { label: "Post", onClick: (item: any) => postReceipt(item.id), visible: (item: any) => statusVisible(item.status, "draft", "approved") },
-        { label: "Void", onClick: (item: any) => voidReceipt(item.id), visible: (item: any) => !statusVisible(item.status, "void", "posted"), variant: "destructive" },
+        {
+          label: "Post Goods Receipt",
+          onClick: (item: any) => postReceipt(item.id),
+          visible: (item: any) => statusVisible(item.status, "draft", "approved"),
+          confirm: {
+            title: "Post goods receipt",
+            confirmLabel: "Post receipt",
+            description: "Posting finalizes received quantities into the stock ledger and GRNI control. The document becomes read-only.",
+          },
+        },
+        {
+          label: "Void Goods Receipt",
+          onClick: (item: any) => voidReceipt(item.id),
+          visible: (item: any) => !statusVisible(item.status, "void", "posted"),
+          variant: "destructive",
+          confirm: {
+            title: "Void goods receipt",
+            confirmLabel: "Void receipt",
+            description: "Void only when the receipt should be cancelled. Consider stock/accounting implications before proceeding.",
+            variant: "destructive",
+          },
+        },
       ]}
       counterpartyOptions={vendorOptions}
       itemOptions={itemOptions}

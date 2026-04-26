@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { accountingReportsApi } from "@/services/api";
 import { toast } from "sonner";
 
@@ -6,7 +6,7 @@ export const useReconciliations = (asOfDate?: string) => {
   const [data, setData] = useState<any>(null);
   const [isLoading, setIsLoading] = useState(true);
 
-  const fetchReconciliations = async () => {
+  const fetchReconciliations = useCallback(async () => {
     try {
       const params = { asOfDate };
       const [summary, ar, ap, inventory, tax, advances, grni] = await Promise.allSettled([
@@ -38,11 +38,12 @@ export const useReconciliations = (asOfDate?: string) => {
     } finally {
       setIsLoading(false);
     }
-  };
+  }, [asOfDate]);
 
   useEffect(() => {
-    fetchReconciliations();
-  }, [asOfDate]);
+    setIsLoading(true);
+    void fetchReconciliations();
+  }, [fetchReconciliations]);
 
   return {
     reconciliations: data,

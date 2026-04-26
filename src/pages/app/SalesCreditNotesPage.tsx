@@ -42,9 +42,38 @@ export const SalesCreditNotesPage = () => {
         { header: "Return Stock", align: "center", render: (item: any) => item.return_to_stock ? "Yes" : "No" },
       ]}
       actions={[
-        { label: "Approve", onClick: (item: any) => approveCreditNote(item.id), visible: (item: any) => statusVisible(item.status, "draft") },
-        { label: "Post", onClick: (item: any) => postCreditNote(item.id), visible: (item: any) => statusVisible(item.status, "approved") },
-        { label: "Void", onClick: (item: any) => voidCreditNote(item.id), visible: (item: any) => !statusVisible(item.status, "void", "posted"), variant: "destructive" },
+        {
+          label: "Approve Credit Note",
+          onClick: (item: any) => approveCreditNote(item.id),
+          visible: (item: any) => statusVisible(item.status, "draft"),
+          confirm: {
+            title: "Approve sales credit note",
+            confirmLabel: "Approve credit note",
+            description: "Approving moves the credit note to posting. Confirm invoice references and stock return selection.",
+          },
+        },
+        {
+          label: "Post Credit Note",
+          onClick: (item: any) => postCreditNote(item.id),
+          visible: (item: any) => statusVisible(item.status, "approved"),
+          confirm: {
+            title: "Post sales credit note",
+            confirmLabel: "Post credit note",
+            description: "Posting creates the accounting reversal and makes the document read-only.",
+          },
+        },
+        {
+          label: "Void Credit Note",
+          onClick: (item: any) => voidCreditNote(item.id),
+          visible: (item: any) => !statusVisible(item.status, "void", "posted"),
+          variant: "destructive",
+          confirm: {
+            title: "Void sales credit note",
+            confirmLabel: "Void credit note",
+            description: "Void only when you must cancel this credit note. If posted, a correcting note may be required instead.",
+            variant: "destructive",
+          },
+        },
       ]}
       counterpartyOptions={customerOptions}
       itemOptions={itemOptions}

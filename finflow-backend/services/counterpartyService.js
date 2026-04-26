@@ -10,6 +10,8 @@ class CounterpartyService {
     }
     this.pool = pool;
     this.idFactory = options.idFactory || (() => crypto.randomUUID());
+    /** Dedupe noisy fallback logs — resolveCompanyId is called on many hot paths. */
+    this._companyFallbackWarned = new Set();
   }
 
   async queryAll(conn, sql, params = []) {
@@ -94,10 +96,13 @@ class CounterpartyService {
 
     if (!company?.id) {
       // Transitional compatibility: older seeded/demo environments may still
-      // operate with profile-scoped data and no populated companies row. Keep
-      // those environments usable while logging loudly so the mapping can be
-      // backfilled properly.
-      console.warn(`[COUNTERPARTY_COMPANY_FALLBACK] No company mapping found for actor ${actorUserId}; falling back to profile-scoped company id.`);
+      // operate with profile-scoped data and no populated companies row.
+      if (!this._companyFallbackWarned.has(actorUserId)) {
+        this._companyFallbackWarned.add(actorUserId);
+        console.warn(
+          `[COUNTERPARTY_COMPANY_FALLBACK] No company mapping found for actor ${actorUserId}; falling back to profile-scoped company id (this message is shown once per process).`
+        );
+      }
       return actorUserId;
     }
 
@@ -492,6 +497,14 @@ class CounterpartyService {
       return this.toSnapshot(canonical, "modern_customer");
     }
 
+    // Draft payloads and list dropdowns may send the canonical counterparty id as client/customer id.
+    if (customerId) {
+      const byCanonical = await this.getCanonicalById(conn, resolvedCompanyId, customerId, "customer");
+      if (byCanonical) {
+        return this.toSnapshot(byCanonical, "modern_customer");
+      }
+    }
+
     const modern = await this.resolveModernCustomer(conn, resolvedCompanyId, customerId);
     if (modern) return modern;
 
@@ -509,6 +522,14 @@ class CounterpartyService {
       const canonical = await this.getCanonicalById(conn, resolvedCompanyId, explicitCounterpartyId, "vendor");
       if (!canonical) throw new Error("Vendor not found");
       return this.toSnapshot(canonical, "modern_vendor");
+    }
+
+    // Draft payloads and list dropdowns may send the canonical counterparty id as vendor id.
+    if (vendorId) {
+      const byCanonical = await this.getCanonicalById(conn, resolvedCompanyId, vendorId, "vendor");
+      if (byCanonical) {
+        return this.toSnapshot(byCanonical, "modern_vendor");
+      }
     }
 
     const modern = await this.resolveModernVendor(conn, resolvedCompanyId, vendorId);

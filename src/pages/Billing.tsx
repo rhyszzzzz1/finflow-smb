@@ -22,7 +22,7 @@ interface InvoiceItem {
 
 const Billing = () => {
   const { invoices, isLoading, addInvoice, updateStatus, deleteInvoice } = useInvoices();
-  const { inventory, isLoading: inventoryLoading } = useInventory();
+  const { inventory, isLoading: inventoryLoading } = useInventory({ includeLegacy: true });
   const [isDialogOpen, setIsDialogOpen] = useState(false);
   const [filter, setFilter] = useState("all");
 

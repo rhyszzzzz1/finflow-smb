@@ -607,8 +607,10 @@ class SalesInvoiceService {
         rejection_comment: null,
         decisions: [],
       };
+    const customerKey = header.counterparty_id || header.customer_id || null;
     return {
       ...header,
+      customer_id: customerKey != null ? String(customerKey) : header.customer_id,
       status: this.deriveDisplayStatus(header.status, paymentSnapshot, header.due_date),
       base_status: header.status,
       payment: paymentSnapshot,

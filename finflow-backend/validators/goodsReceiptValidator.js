@@ -12,10 +12,11 @@ function validateGoodsReceiptPayload(body) {
 
   for (let i = 0; i < body.lines.length; i += 1) {
     const line = body.lines[i] || {};
-    if (!(line.item_id || line.purchase_order_line_id)) {
-      errors.push(`lines[${i}].item_id or lines[${i}].purchase_order_line_id is required`);
+    const hasDesc = String(line.description || "").trim().length > 0;
+    if (!(line.item_id || line.purchase_order_line_id || hasDesc)) {
+      errors.push(`lines[${i}]: item_id, purchase_order_line_id, or description is required`);
     }
-    if (!line.description && !line.purchase_order_line_id) {
+    if (!hasDesc && !line.purchase_order_line_id) {
       errors.push(`lines[${i}].description is required when not referencing a purchase order line`);
     }
     if (line.received_quantity === undefined || line.received_quantity === null) {

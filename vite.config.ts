@@ -11,7 +11,8 @@ export default defineConfig(({ mode }) => {
   return {
     server: {
       host: true,
-      port: Number(env.VITE_DEV_PORT) || 8080,
+      // Default 5173 avoids clashing with other local apps commonly bound to 8080. Override with VITE_DEV_PORT.
+      port: Number(env.VITE_DEV_PORT) || 5173,
       proxy: {
         "/api": {
           target: backendTarget,
